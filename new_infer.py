@@ -2,8 +2,7 @@ from __future__ import division, print_function
 
 import argparse
 import random
-import warnings
-warnings.filterwarnings("ignore")
+
 import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
@@ -17,6 +16,7 @@ import utils
 from datasets.ae_transforms import *
 from datasets.imprint_dataset import Rescale as IRescale
 from models.model import ModelBuilder
+from utils import get_vocabulary
 
 random.seed(1234)
 np.random.seed(1234)
@@ -25,9 +25,65 @@ cudnn.deterministic = True
 cudnn.benchmark = False
 cudnn.enabled = True
 
+
+		# self.test_data = dataset.ImageDataset(
+		# 	root=self.test_root,
+		# 	voc=self.opt.alphabet,
+		# 	transform=self.test_transforms,
+		# 	voc_type='file',
+		# 	return_list=True
+		# )
+
+
+    # def __init__(self, root, voc, num_samples=np.inf,
+    #              transform=None, label_transform=None,
+    #              voc_type='file', lowercase=False,
+    #              alphanumeric=False, ctc_blank='<b>',
+    #              return_list=True):
+
 class BaseHTR(object):
 	def __init__(self, opt):
 		self.opt = opt
+		
+
+
+
+		# label_transform = False
+		self.voc = self.opt.alphabet
+		print("self.alphabet:", self.opt.alphabet)
+		# self.transform = transform
+		# self.label_transform = label_transform
+		voc_type = 'file'
+		lowercase = False
+		alphanumeric = False
+        # self.nSamples = len(self.get_images(root))
+        # self.nSamples = int(float(self.txn.get(b"num-samples")))
+        # self.nSamples = min(self.nSamples, num_samples)
+		self.voc = get_vocabulary(self.voc, voc_type, lowercase, alphanumeric)
+		print("self.voc:", self.voc)
+		self.char2id = dict(zip(self.voc, range(1, len(self.voc)+1))) # 0 reserved for ctc blank
+		self.id2char = dict(zip(range(1, len(self.voc)+1), self.voc))
+		print("self.char2id:", self.char2id)
+		ctc_blank='<b>'
+		self.char2id[ctc_blank] = 0
+		self.id2char[0] = ctc_blank
+		self.ctc_blank = ctc_blank
+		# self.lowercase = lowercase
+		# self.alphanumeric = alphanumeric
+		self.rec_num_classes = len(self.id2char)
+		# self.return_list = return_list
+
+
+
+
+
+
+
+
+
+
+
+
 		self.test_transforms = Compose([
 			IRescale(max_width=256, height=96),
 			ToTensor()
@@ -46,22 +102,20 @@ class BaseHTR(object):
 			self.opt.gpu_id = list(map(int, self.opt.gpu_id.split(',')))
 			torch.cuda.set_device(self.opt.gpu_id[0])
 
-		self.test_data = dataset.ImageDataset(
-			root=self.test_root,
-			voc=self.opt.alphabet,
-			transform=self.test_transforms,
-			voc_type='file',
-			return_list=True
-		)
-
-		print("self.data:", self.test_data)
+		# self.test_data = dataset.ImageDataset(
+		# 	root=self.test_root,
+		# 	voc=self.opt.alphabet,
+		# 	transform=self.test_transforms,
+		# 	voc_type='file',
+		# 	return_list=True
+		# )
+        
 		self.converter = utils.strLabelConverter(
-			self.test_data.id2char,
-			self.test_data.char2id,
-			self.test_data.ctc_blank
+			self.id2char,
+			self.char2id,
+			self.ctc_blank
 		)
-		self.nclass = self.test_data.rec_num_classes
-		print(self.nclass)
+		self.nclass = self.rec_num_classes
 
 		crnn = ModelBuilder(
 			96, 256,
@@ -79,6 +133,7 @@ class BaseHTR(object):
 		)
 		if self.opt.cuda:
 			crnn.cuda()
+			print("self.opt.gpu_id", self.opt.gpu_id)
 			crnn = torch.nn.DataParallel(crnn, device_ids=self.opt.gpu_id, dim=1)
 		else:
 			crnn = torch.nn.DataParallel(crnn, device_ids=self.opt.gpu_id)
@@ -89,45 +144,46 @@ class BaseHTR(object):
 		print('Model loading complete')
 
 		self.init_variables()
-		print('Classes: ', self.test_data.voc)
-		print('#Test Samples: ', self.test_data.nSamples)
+		print('Classes: ', self.voc)
+		# print('#Test Samples: ', self.nSamples)
 
-		data_loader = torch.utils.data.DataLoader(
-			self.test_data,
-			batch_size=64,
-			num_workers=2,
-			pin_memory=True,
-			collate_fn=dataset.collatedict(),
-			drop_last=False
-		)
+		# data_loader = torch.utils.data.DataLoader(
+		# 	self.test_data,
+		# 	batch_size=64,
+		# 	num_workers=2,
+		# 	pin_memory=True,
+		# 	collate_fn=dataset.collatedict(),
+		# 	drop_last=False
+		# )
 		gts = []
 		decoded_preds = []
-		val_iter = iter(data_loader)
-		max_iter = min(np.inf, len(data_loader))
-		print("max_iter:", max_iter)
+		# val_iter = iter(data_loader)
+		# max_iter = min(np.inf, len(data_loader))
+		image = Image.open("data/english/eng_hand.jpg").convert('L')
+		image = self.test_transforms(image)
+		print("image:", image)
+		print("image shpae:", image.shape)
+		cpu_images = image[None, :, :, :]
+		print("cpu_images:", cpu_images.shape)
+		cpu_texts = "image_new"
 		with torch.no_grad():
-			for i in range(max_iter):
-				# print("next_val_iter:", next(val_iter))
-				cpu_images, cpu_texts = next(val_iter)
-				print("cpu_images: ", cpu_images, "cpu_texts: ", cpu_texts)
-				print("cpu shapes", cpu_images.shape)
-				print("self image:", self.image)
-				print("self image:", self.image.size())
-				utils.loadData(self.image, cpu_images)
-				print("self.image:", self.image.shape)
-				output_dict = self.model(self.image)
-				batch_size = cpu_images.size(0)
+			# for i in range(max_iter):
+				# cpu_images, cpu_texts = next(val_iter)
+			utils.loadData(self.image, cpu_images)
+			output_dict = self.model(self.image)
+			batch_size = cpu_images.size(0)
 
-				preds = F.log_softmax(output_dict['probs'], 2)
+			preds = F.log_softmax(output_dict['probs'], 2)
 
-				preds_size = torch.IntTensor([preds.size(0)] * batch_size)
-				_, preds = preds.max(2)
-				preds = preds.transpose(1, 0).contiguous().view(-1)
-				decoded_pred = self.converter.decode(preds.data, preds_size.data, raw=False)
-				print("decoded_pred:",decoded_pred)
-				gts += list(cpu_texts)
-				decoded_preds += list(decoded_pred)
+			preds_size = torch.IntTensor([preds.size(0)] * batch_size)
+			_, preds = preds.max(2)
+			preds = preds.transpose(1, 0).contiguous().view(-1)
+			decoded_pred = self.converter.decode(preds.data, preds_size.data, raw=False)
 
+			gts += list(cpu_texts)
+			decoded_preds += list(decoded_pred)
+			print(decoded_preds)
+			print("decoded_preds:", ''.join(decoded_preds))
 		directory = self.opt.out_dir
 		writepath1 = directory + '/' + "output" + ".txt" 
 		print(writepath1)
@@ -142,9 +198,9 @@ class BaseHTR(object):
 
 
 	def init_variables(self):
-		self.image = torch.FloatTensor(1, 3, 96, 256)
-		self.text = torch.LongTensor(1 * 5)
-		self.length = torch.LongTensor(1)
+		self.image = torch.FloatTensor(64, 3, 96, 256)
+		self.text = torch.LongTensor(64 * 5)
+		self.length = torch.LongTensor(64)
 		if self.opt.cuda:
 			self.image = self.image.cuda()
 			self.text = self.text.cuda()
@@ -163,5 +219,6 @@ if __name__ == "__main__":
 
 	opt = parser.parse_args()
 	opt.alphabet = f'{opt.language}_lexicon.txt'
+	print("alphabet: ",opt.alphabet)
 	obj = BaseHTR(opt)
 	# obj.run()
