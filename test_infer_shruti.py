@@ -1,0 +1,215 @@
+from __future__ import division, print_function
+
+import argparse
+import random
+import json
+import os
+from os.path import join
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+from torchvision.transforms import Compose
+
+import datasets.dataset as dataset
+import utils
+from datasets.ae_transforms import *
+from datasets.imprint_dataset import Rescale as IRescale
+from models.model import ModelBuilder
+from utils import get_vocabulary
+
+# No data loader functions needed here
+
+class BaseHTR(object):
+  def __init__(self, opt):
+    self.opt = opt
+
+    # label_transform = False
+    self.voc = self.opt.alphabet
+    print("self.alphabet:", self.opt.alphabet)
+
+    # self.transform = transform
+    # self.label_transform = label_transform
+
+    voc_type = 'file'
+    lowercase = False
+    alphanumeric = False
+
+    # self.nSamples = len(self.get_images(root))
+    # self.nSamples = int(float(self.txn.get(b"num-samples")))
+    # self.nSamples = min(self.nSamples, num_samples)
+
+    self.voc = get_vocabulary(self.voc, voc_type, lowercase, alphanumeric)
+    print("self.voc:", self.voc)
+
+    self.char2id = dict(zip(self.voc, range(1, len(self.voc)+1)))  # 0 reserved for ctc blank
+    self.id2char = dict(zip(range(1, len(self.voc)+1), self.voc))
+    print("self.char2id:", self.char2id)
+
+    ctc_blank = '<b>'
+    self.char2id[ctc_blank] = 0
+    self.id2char[0] = ctc_blank
+    self.ctc_blank = ctc_blank
+
+    # self.lowercase = lowercase
+    # self.alphanumeric = alphanumeric
+
+    self.rec_num_classes = len(self.id2char)
+
+    # self.return_list = return_list
+
+    self.test_transforms = Compose([
+      IRescale(max_width=256, height=96),
+      ToTensor()
+    ])
+
+    self.identity_matrix = torch.tensor(
+      [1, 0, 0, 0, 1, 0],
+      dtype=torch.float
+    ).cpu()
+
+    # Use CPU or CUDA based on availability and user preference
+    if torch.cuda.is_available() and self.opt.cuda:
+      print("CUDA is available, setting device.")
+      self.identity_matrix = self.identity_matrix.cuda()
+      self.opt.gpu_id = list(map(int, self.opt.gpu_id.split(',')))
+      torch.cuda.set_device(self.opt.gpu_id[0])
+    else:
+      print("Running on CPU.")
+
+    self.converter = utils.strLabelConverter(
+      self.id2char,
+      self.char2id,
+      self.ctc_blank
+    )
+    self.nclass = self.rec_num_classes
+
+
+    crnn = ModelBuilder(
+      96, 256,
+      [48,128], [96,256],
+      20, [0.05, 0.05],
+      'none',
+      256, 1, 1,
+      self.nclass,
+      STN_type='TPS',
+      nheads=1,
+      stn_attn=None,
+      use_loc_bn=False,
+      loc_block = 'LocNet',
+      CNN='ResCRNN'
+    )
+
+    # Use CPU or CUDA for the model
+    if torch.cuda.is_available() and self.opt.cuda:
+      crnn.cuda()
+      crnn = torch.nn.DataParallel(crnn, device_ids=self.opt.gpu_id, dim=1)
+    else:
+      crnn = torch.nn.DataParallel(crnn, device_ids=self.opt.gpu_id)
+
+    print('Using pretrained model', self.opt.ocr_pretrained)
+    crnn.load_state_dict(torch.load(self.opt.ocr_pretrained, map_location='cpu'))  # Load on CPU
+    self.model = crnn
+    self.model.eval()
+    print('Model loading complete')
+
+    self.init_variables()
+    print('Classes: ', self.voc)
+    gts = []
+    decoded_preds = []
+    image = Image.open("/home/azureuser/BhaashaOCR/Test_images_languges/English.jpg").convert('L')
+    image = self.test_transforms(image)
+    print("image:", image)
+    print("image shape:", image.shape)
+    cpu_images = image[None, :, :, :]
+    print("cpu_images:", cpu_images.shape)
+    cpu_texts = "image_new"
+    
+    with torch.no_grad():
+        utils.loadData(self.image, cpu_images)
+        output_dict = self.model(self.image)
+        batch_size = cpu_images.size(0)
+        preds = F.log_softmax(output_dict['probs'], 2)
+        preds_size = torch.IntTensor([preds.size(0)] * batch_size)
+        _, preds = preds.max(2)
+        preds = preds.transpose(1, 0).contiguous().view(-1)
+        decoded_pred = self.converter.decode(preds.data, preds_size.data, raw=False)
+        print("Decoded Prediction:", decoded_pred)
+        gts += list(cpu_texts)
+        decoded_preds += list(decoded_pred)
+        print(decoded_preds)
+        print("decoded_preds:", ''.join(decoded_preds))
+    directory = self.opt.out_dir
+    writepath1 = directory + '/' + "output" + ".txt" 
+    print(writepath1)
+    with open(writepath1, 'w', encoding='utf-8') as f1:
+        for target, pred in zip(gts, decoded_preds):         
+            print(target, pred)
+            f1.write(str(target))
+            f1.write("\t")
+            f1.write(str(pred))
+            f1.write("\n")
+            return
+    
+
+  def init_variables(self):
+    self.image = torch.FloatTensor(1, 3, 96, 256)  # Reshaped for single image
+    self.text = torch.LongTensor(5)
+    self.length = torch.LongTensor(1)
+    if self.opt.cuda:
+      self.image = self.image.cuda()
+      self.text = self.text.cuda()
+      self.length = self.length.cuda()
+
+    
+# def inference(self, image_path):
+#     """Performs inference on a single image using the loaded model."""
+#     image = self.test_transforms(cv2.imread(image_path))  # Load and preprocess image
+    
+#     # Move image to CPU or CUDA based on the device
+#     if torch.cuda.is_available() and self.opt.cuda:
+#       image = image.cuda()
+
+#     utils.loadData(self.image, image.unsqueeze(0))  # Reshape for batch dimension
+#     output_dict = self.model(self.image)
+
+#     preds = F.log_softmax(output_dict['probs'], 2)
+#     preds_size = torch.IntTensor([preds.size(0)])
+#     _, preds = preds.max(2)
+#     preds = preds.transpose(1, 0).contiguous().view(-1)
+#     decoded_pred = self.converter.decode(preds.data, preds_size.data, raw=False)
+
+#     print('Predicted Text:', decoded_pred[0])
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument('--image_path', help='path to the page image')
+    parser.add_argument('--pretrained', default='', help="path to pretrained folder containing layout and ocr models")
+    parser.add_argument('--out_dir', type=str, default="out", help='path to the output folder')
+    # parser.add_argument('--language', help='Language of inference model to be called')
+
+    parser.add_argument('--cuda', default=False, action='store_true', help='enables cuda')
+    parser.add_argument('--gpu_id', type=str, default='0', help='gpu device ids')
+    parser.add_argument('--alphabet', type=str, default='0123456789abcdefghijklmnopqrstuvwxyz*')
+    
+    opt = parser.parse_args()
+
+    opt.ocr_pretrained = join(opt.pretrained, 'ocr.pth')
+    opt.layout_pretrained = join(opt.pretrained, 'layout.pt')
+    # opt.alphabet = f'alphabet/{opt.language}_lexicon.txt'
+    opt.alphabet = join(opt.pretrained, 'lexicon.txt')
+    if not os.path.exists(opt.layout_pretrained):
+        print(f'Layout model not found at: {opt.layout_pretrained}')
+        exit(1)
+    if not os.path.exists(opt.ocr_pretrained):
+        print(f'OCR model not found at: {opt.ocr_pretrained}')
+        exit(1)
+    if not os.path.exists(opt.alphabet):
+        print(f'Lexicon not found at: {opt.alphabet}')
+        exit(1)
+
+
+    obj = BaseHTR(opt)
+    #obj.inference(opt.image_path)
+
