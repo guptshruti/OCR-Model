@@ -1,0 +1,106 @@
+# Colab-specific setup
+!pip install layoutparser[layoutmodels] pdf2image opencv-python pdf2image PyMuPDF reportlab camelot-py tabulate
+
+import layoutparser as lp
+from pdf2image import convert_from_path
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+import fitz  # PyMuPDF
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+import camelot
+from tabulate import tabulate
+
+# 1. Load the document (image or PDF)
+def load_document(file_path):
+    if file_path.endswith('.pdf'):
+        images = convert_from_path(file_path)
+        return images
+    elif file_path.endswith(('.jpg', '.png')):
+        img = cv2.imread(file_path)
+        return [img]
+    else:
+        raise ValueError("Unsupported file format. Only PDFs and images are supported.")
+
+# 2. Detect the layout using LayoutParser
+def detect_layout(image):
+    model = lp.Detectron2LayoutModel(
+        config_path="lp://PubLayNet/faster_rcnn_R_50_FPN_3x/config",
+        label_map={0: "Text", 1: "Title", 2: "Figure", 3: "Table", 4: "List"},
+        extra_config=["MODEL.ROI_HEADS.SCORE_THRESH_TEST", 0.5]
+    )
+    layout = model.detect(image)
+    return layout
+
+# 3. Extract tables separately using Camelot
+def extract_tables_from_pdf(pdf_path):
+    tables = camelot.read_pdf(pdf_path, pages='all', flavor='stream')
+    table_text = ""
+    for table in tables:
+        table_text += tabulate(table.df, tablefmt="grid") + "\n\n"
+    return table_text
+
+# 4. Insert OCR model API (this is where you plug in your OCR model)
+def extract_text_from_ocr(image_region):
+    # Placeholder: Replace with your OCR model API
+    # For demonstration, we'll use pytesseract (which you should replace)
+    import pytesseract
+    text = pytesseract.image_to_string(image_region)
+    return text
+
+# 5. Process the image and extract different elements
+def process_document(images):
+    for i, image in enumerate(images):
+        print(f"Processing page {i+1}...")
+        
+        # Detect layout elements (tables, images, text)
+        layout = detect_layout(image)
+
+        # Extract detected elements
+        for block in layout:
+            # Extract tables
+            if block.type == "Table":
+                print(f"Table detected at {block.coordinates}. You can handle this separately.")
+            
+            # Extract images
+            elif block.type == "Figure":
+                print(f"Image detected at {block.coordinates}. You can handle this separately.")
+            
+            # Process text regions with your OCR model
+            elif block.type == "Text":
+                x1, y1, x2, y2 = map(int, block.coordinates)
+                text_region = image[y1:y2, x1:x2]
+                text = extract_text_from_ocr(text_region)
+                print(f"Extracted text: {text[:100]}...")  # Print the first 100 chars
+
+# 6. Rebuild the document (this is where you would combine everything back into a PDF)
+def rebuild_document(images, output_pdf):
+    c = canvas.Canvas(output_pdf, pagesize=letter)
+    width, height = letter
+
+    for i, image in enumerate(images):
+        # For each page, draw the image as background (optional)
+        img_path = f"page_{i+1}.png"
+        cv2.imwrite(img_path, image)
+        c.drawImage(img_path, 0, 0, width, height)
+        # Add text (for demo purposes, we skip the part of adding text back)
+        # In a real implementation, you'd overlay the extracted text/tables here.
+        c.showPage()
+
+    c.save()
+
+# 7. Example usage on Colab
+if __name__ == "__main__":
+    # Step 1: Load the document (replace with your file path)
+    file_path = "/content/sample_document.pdf"  # Use any document from Colab storage or Google Drive
+    images = load_document(file_path)
+
+    # Step 2: Process each page of the document
+    process_document(images)
+
+    # Step 3: Rebuild the document (optional)
+    output_pdf = "/content/processed_document.pdf"
+    rebuild_document(images, output_pdf)
+
+    print(f"Document processing complete. Output saved at {output_pdf}")
