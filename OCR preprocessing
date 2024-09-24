@@ -1,16 +1,14 @@
-# Colab-specific setup
-!pip install layoutparser[layoutmodels] pdf2image opencv-python pdf2image PyMuPDF reportlab camelot-py tabulate
-
 import layoutparser as lp
 from pdf2image import convert_from_path
 import cv2
 import numpy as np
-import matplotlib.pyplot as plt
 import fitz  # PyMuPDF
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 import camelot
 from tabulate import tabulate
+import pytesseract
+import os
 
 # 1. Load the document (image or PDF)
 def load_document(file_path):
@@ -44,29 +42,28 @@ def extract_tables_from_pdf(pdf_path):
 # 4. Insert OCR model API (this is where you plug in your OCR model)
 def extract_text_from_ocr(image_region):
     # Placeholder: Replace with your OCR model API
-    # For demonstration, we'll use pytesseract (which you should replace)
-    import pytesseract
     text = pytesseract.image_to_string(image_region)
     return text
 
 # 5. Process the image and extract different elements
-def process_document(images):
+def process_document(images, pdf_path=None):
     for i, image in enumerate(images):
         print(f"Processing page {i+1}...")
-        
+
         # Detect layout elements (tables, images, text)
         layout = detect_layout(image)
 
         # Extract detected elements
         for block in layout:
-            # Extract tables
-            if block.type == "Table":
-                print(f"Table detected at {block.coordinates}. You can handle this separately.")
-            
+            # Extract tables (if working with PDF)
+            if block.type == "Table" and pdf_path:
+                table_text = extract_tables_from_pdf(pdf_path)
+                print(f"Table text: {table_text}")
+
             # Extract images
             elif block.type == "Figure":
                 print(f"Image detected at {block.coordinates}. You can handle this separately.")
-            
+
             # Process text regions with your OCR model
             elif block.type == "Text":
                 x1, y1, x2, y2 = map(int, block.coordinates)
@@ -90,17 +87,17 @@ def rebuild_document(images, output_pdf):
 
     c.save()
 
-# 7. Example usage on Colab
+# 7. Example usage on Local Machine (VSCode)
 if __name__ == "__main__":
     # Step 1: Load the document (replace with your file path)
-    file_path = "/content/sample_document.pdf"  # Use any document from Colab storage or Google Drive
+    file_path = "sample_document.pdf"  # Provide the path to your PDF or image
     images = load_document(file_path)
 
     # Step 2: Process each page of the document
-    process_document(images)
+    process_document(images, file_path if file_path.endswith('.pdf') else None)
 
     # Step 3: Rebuild the document (optional)
-    output_pdf = "/content/processed_document.pdf"
+    output_pdf = "processed_document.pdf"
     rebuild_document(images, output_pdf)
 
     print(f"Document processing complete. Output saved at {output_pdf}")
