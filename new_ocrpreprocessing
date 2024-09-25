@@ -1,25 +1,24 @@
-import torch
 import cv2
+import pytesseract
+from pytesseract import Output
 from ultralytics import YOLO
-from craft_text_detector import Craft
 import numpy as np
 from PIL import Image
 
-# Load YOLOv8 model
+# Load YOLO model (for object detection)
 yolo_model = YOLO('yolov8s.pt')  # YOLOv8 small model
 
-# Craft text detector instance
-craft = Craft(output_dir='craft_output/', crop_type="poly", cuda=False)  # Set cuda=True if GPU is available
-
-# YOLO object detection (tables, images, etc.)
+# Function to detect objects (tables, images) using YOLO
 def detect_objects(image_path):
     results = yolo_model(image_path)  # Run YOLOv8 detection
     return results
 
-# CRAFT text detection
-def detect_text(image_path):
-    prediction_result = craft.detect_text(image_path)
-    return prediction_result
+# Function to extract text using Pytesseract
+def extract_text(image_path):
+    img = cv2.imread(image_path)
+    # Get OCR results
+    ocr_data = pytesseract.image_to_data(img, output_type=Output.DICT)
+    return ocr_data
 
 # Visualize YOLO object detection results
 def visualize_yolo_results(image_path, yolo_results):
@@ -33,28 +32,51 @@ def visualize_yolo_results(image_path, yolo_results):
     cv2.imwrite(output_path, image)
     print(f"YOLO result saved to {output_path}")
 
-# Visualize and save detected text regions
-def visualize_and_save_text_result(image_path, prediction_result):
+# Visualize text detection results from Pytesseract
+def visualize_text_results(image_path, ocr_data):
     image = cv2.imread(image_path)
-    for box in prediction_result["boxes"]:
-        box = np.array(box).astype(np.int32)
-        cv2.polylines(image, [box], isClosed=True, color=(0, 255, 0), thickness=2)
-    output_path = 'detected_text_image.jpg'
+    n_boxes = len(ocr_data['level'])
+    for i in range(n_boxes):
+        (x, y, w, h) = (ocr_data['left'][i], ocr_data['top'][i], ocr_data['width'][i], ocr_data['height'][i])
+        cv2.rectangle(image, (x, y), (x + w, y + h), (0, 0, 255), 2)
+    output_path = 'text_detected_image.jpg'
     cv2.imwrite(output_path, image)
     print(f"Text detection result saved to {output_path}")
+
+# Function to reconstruct document layout
+def reconstruct_document(image_path, yolo_results, ocr_data):
+    img = cv2.imread(image_path)
+    reconstructed_img = img.copy()
+
+    # Draw detected objects from YOLO (images/tables)
+    for result in yolo_results:
+        boxes = result.boxes.xyxy
+        for box in boxes:
+            x1, y1, x2, y2 = map(int, box)
+            cv2.rectangle(reconstructed_img, (x1, y1), (x2, y2), (0, 255, 0), 2)  # Draw objects (green boxes)
+
+    # Draw text boxes from Pytesseract
+    n_boxes = len(ocr_data['level'])
+    for i in range(n_boxes):
+        (x, y, w, h) = (ocr_data['left'][i], ocr_data['top'][i], ocr_data['width'][i], ocr_data['height'][i])
+        cv2.rectangle(reconstructed_img, (x, y), (x + w, y + h), (0, 0, 255), 2)  # Draw text (red boxes)
+
+    # Save the reconstructed image
+    output_path = 'reconstructed_document.jpg'
+    cv2.imwrite(output_path, reconstructed_img)
+    print(f"Reconstructed document saved to {output_path}")
 
 # Main function
 if __name__ == "__main__":
     image_path = 'path_to_your_image.jpg'
 
-    # 1. Detect objects (tables, images) using YOLOv8
+    # 1. Detect objects (tables, images) using YOLO
     yolo_results = detect_objects(image_path)
     visualize_yolo_results(image_path, yolo_results)
 
-    # 2. Detect text using CRAFT
-    prediction_result = detect_text(image_path)
-    visualize_and_save_text_result(image_path, prediction_result)
+    # 2. Extract text using Pytesseract
+    ocr_data = extract_text(image_path)
+    visualize_text_results(image_path, ocr_data)
 
-    # Free CRAFT model resources
-    craft.unload_craftnet_model()
-    craft.unload_refinenet_model()
+    # 3. Reconstruct document layout
+    reconstruct_document(image_path, yolo_results, ocr_data)
