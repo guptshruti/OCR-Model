@@ -1,0 +1,85 @@
+import torch
+import torchvision
+from torchvision import transforms
+from torchvision.models import vgg16, VGG16_Weights
+import cv2
+from craft_text_detector import Craft
+import numpy as np
+from PIL import Image
+
+# Load YOLO model (PyTorch Hub)
+yolo_model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
+
+# Load VGG16 model for feature extraction
+vgg_model = vgg16(weights=VGG16_Weights.DEFAULT)
+vgg_model.eval()
+
+# Initialize CRAFT text detector
+craft = Craft(output_dir='craft_output/', crop_type="poly", cuda=False)  # Set cuda=True if GPU is available
+
+# Image preprocessing function for VGG16
+def preprocess_image(image_path):
+    preprocess = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+    image = Image.open(image_path).convert('RGB')
+    image_tensor = preprocess(image).unsqueeze(0)  # Add batch dimension
+    return image_tensor
+
+# YOLO object detection (tables, images)
+def detect_objects(image_path):
+    image = Image.open(image_path).convert('RGB')
+    results = yolo_model(image)  # Run YOLO detection
+    return results
+
+# Feature extraction from the image using VGG16
+def extract_features(image_tensor):
+    with torch.no_grad():
+        features = vgg_model(image_tensor)
+    return features
+
+# CRAFT text detection
+def detect_text(image_path):
+    prediction_result = craft.detect_text(image_path)
+    return prediction_result
+
+# Visualize YOLO object detection results
+def visualize_yolo_results(image_path, yolo_results):
+    image = cv2.imread(image_path)
+    yolo_results.render()  # YOLO renders boxes on the image
+    output_path = 'yolo_detected_image.jpg'
+    cv2.imwrite(output_path, yolo_results.imgs[0])
+    print(f"YOLO result saved to {output_path}")
+
+# Visualize and save detected text regions
+def visualize_and_save_text_result(image_path, prediction_result):
+    image = cv2.imread(image_path)
+    for box in prediction_result["boxes"]:
+        box = np.array(box).astype(np.int32)
+        cv2.polylines(image, [box], isClosed=True, color=(0, 255, 0), thickness=2)
+    output_path = 'detected_text_image.jpg'
+    cv2.imwrite(output_path, image)
+    print(f"Text detection result saved to {output_path}")
+
+# Main function
+if __name__ == "__main__":
+    image_path = 'path_to_your_image.jpg'
+
+    # 1. Preprocess and extract features using VGG16
+    image_tensor = preprocess_image(image_path)
+    features = extract_features(image_tensor)
+    print(f"Extracted features: {features}")
+
+    # 2. Detect objects (images, tables) using YOLO
+    yolo_results = detect_objects(image_path)
+    visualize_yolo_results(image_path, yolo_results)
+
+    # 3. Detect text using CRAFT
+    prediction_result = detect_text(image_path)
+    visualize_and_save_text_result(image_path, prediction_result)
+
+    # Free CRAFT model resources
+    craft.unload_craftnet_model()
+    craft.unload_refinenet_model()
