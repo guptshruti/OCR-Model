@@ -21,57 +21,63 @@ def get_baseline_distance(box1, box2):
 def get_horizontal_distance(box1, box2):
     return abs(box1[1][0] - box2[0][0])
 
-def inpaint_paragraphs(img_path, pipeline, horizontal_threshold=100):
+def inpaint_paragraphs(img_path, pipeline, horizontal_threshold=100, vertical_threshold_factor=1.5):
     img = preprocess_image(img_path)
     img_original = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
     prediction_groups = pipeline.recognize([img])
 
-    for word, box in prediction_groups[0]:
-        top_left = tuple(map(int, box[0]))
-        bottom_right = tuple(map(int, box[2]))
-        cv2.rectangle(img, top_left, bottom_right, (0, 255, 0), 2)  # Green boxes for words
+    # Sort all detected words by their top-left y-coordinate for top-to-bottom ordering
+    words = sorted(prediction_groups[0], key=lambda x: x[1][0][1])
 
+    # Detect median height of a line for determining line and paragraph spacing
     median_height = get_median_line_height([box for _, box in prediction_groups[0]])
+    vertical_threshold = vertical_threshold_factor * median_height
 
     paragraphs = []
     current_paragraph = []
-    threshold_y = 1.5 * median_height
+    current_line = []
+    current_column = []
 
-    # Sort words by y-coordinates (top to bottom) for consistent paragraph detection
-    words = sorted(prediction_groups[0], key=lambda x: x[1][0][1])
-
+    # Group words into lines
     for i, (word, box) in enumerate(words):
-        if not current_paragraph:
-            current_paragraph.append(box)
+        if not current_line:
+            current_line.append((word, box))
+            continue
+        
+        last_word = current_line[-1][1]
+        vertical_distance = get_baseline_distance(last_word, box)
+        horizontal_distance = get_horizontal_distance(last_word, box)
+
+        if horizontal_distance > horizontal_threshold:
+            # New column starts
+            paragraphs.append(current_column)
+            current_column = []
+            current_line = [(word, box)]
+        elif vertical_distance > vertical_threshold:
+            # New paragraph starts within the same column
+            current_column.append(current_line)
+            current_line = [(word, box)]
         else:
-            last_word_box = current_paragraph[-1]
-            vertical_distance = get_baseline_distance(last_word_box, box)
-            horizontal_distance = get_horizontal_distance(last_word_box, box)
+            # Continue current line
+            current_line.append((word, box))
+    
+    # Add the last line and column to paragraphs
+    if current_line:
+        current_column.append(current_line)
+    if current_column:
+        paragraphs.append(current_column)
 
-            # Check for column change by horizontal distance
-            if horizontal_distance > horizontal_threshold:
-                # New column detected, end the current paragraph
-                paragraphs.append(current_paragraph)
-                current_paragraph = [box]
-            elif vertical_distance > threshold_y:
-                # New paragraph within the same column
-                paragraphs.append(current_paragraph)
-                current_paragraph = [box]
-            else:
-                current_paragraph.append(box)
-
-    if current_paragraph:
-        paragraphs.append(current_paragraph)
-
+    # Draw bounding boxes for paragraphs
     paragraph_coords = []
-    for paragraph in paragraphs:
-        min_x = min(coords[0][0] for coords in paragraph)
-        max_x = max(coords[1][0] for coords in paragraph)
-        min_y = min(coords[0][1] for coords in paragraph)
-        max_y = max(coords[2][1] for coords in paragraph)
-        cv2.rectangle(img, (int(min_x), int(min_y)), (int(max_x), int(max_y)), (255, 0, 0), 2)  # Red boxes for paragraphs
-        coords = ((int(min_x), int(min_y)), (int(max_x), int(max_y)))
-        paragraph_coords.append(coords)
+    for column in paragraphs:
+        for lines in column:
+            min_x = min(word_box[1][0][0] for word_box in lines)
+            max_x = max(word_box[1][1][0] for word_box in lines)
+            min_y = min(word_box[1][0][1] for word_box in lines)
+            max_y = max(word_box[1][2][1] for word_box in lines)
+            cv2.rectangle(img, (int(min_x), int(min_y)), (int(max_x), int(max_y)), (255, 0, 0), 2)  # Red boxes for paragraphs
+            coords = ((int(min_x), int(min_y)), (int(max_x), int(max_y)))
+            paragraph_coords.append(coords)
 
     return img, paragraph_coords
 
