@@ -1,51 +1,70 @@
-import layoutparser as lp
-import cv2
 import numpy as np
+import layoutparser as lp
+import torch
+import cv2
 
-# Load the image
-image_path = "your_image.jpg"  # Update with your image path
-image = cv2.imread(image_path)
-image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # Convert to RGB for processing
+# Update this path to your image
+image_path = '/home/azureuser/lekhaanuvaad_processing/Test_images/Gazette_Page_01.jpg'  
+img = cv2.imread(image_path)
 
-# Load the pre-trained PubLayNet model
-model = lp.Detectron2LayoutModel(
-    config_path="lp://PubLayNet/faster_rcnn_R_50_FPN_3x/config",
-    extra_config=["MODEL.ROI_HEADS.SCORE_THRESH_TEST", 0.5],
+
+
+# Load model1 with optimized score threshold
+model1 = lp.Detectron2LayoutModel(
+    config_path="/home/azureuser/lekhaanuvaad_processing/paragraph_detection/pretrained_model/config1.yml",
+    model_path="/home/azureuser/lekhaanuvaad_processing/paragraph_detection/pretrained_model/model1.pth",
+    extra_config=["MODEL.ROI_HEADS.SCORE_THRESH_TEST", 0.15],  # Lowered threshold for better detection
     label_map={0: "Text", 1: "Title", 2: "List", 3: "Table", 4: "Figure"}
 )
 
-# Detect layout
-layout = model.detect(image_rgb)
+# Define color mapping for different types
+color_map = {
+    "Text": (255, 0, 0),    # Red
+    #"Title": (0, 255, 0),   # Green
+    #"List": (0, 0, 255),    # Blue
+    "Table": (255, 255, 0), # Cyan
+    #"Figure": (255, 0, 255) # Magenta
+}
 
-# Filter for text blocks
-text_blocks = lp.Layout([b for b in layout if b.type == "Text"])
+def draw_boxes(image, layout):
+    """Draw bounding boxes on the image based on the layout."""
+    for block in layout:
+        block_type = block.type
+        if block_type in color_map:  # Check if the block type is in our color map
+            x1, y1, x2, y2 = block.coordinates
+            color = color_map[block_type]
+            cv2.rectangle(image, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)  # Draw box
+            # Add text label
+            cv2.putText(image, block_type, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
-# Convert bounding boxes to a usable format
-boxes = [block.coordinates for block in text_blocks]
+    # Save the image with drawn boxes
+    output_image_path = "output_image_model1.jpg"
+    cv2.imwrite(output_image_path, image)
+    print(f"Output image saved as: {output_image_path}")
 
-# Sort by X coordinate to group columns
-boxes = sorted(boxes, key=lambda x: x[0])
+# Load the image and detect layout
+layout_result1 = model1.detect(img)
 
-# Separate into columns based on X-spacing threshold (e.g., 50 pixels)
-columns = []
-current_column = [boxes[0]]
+# Draw boxes and save the image
+draw_boxes(img.copy(), layout_result1)
 
-for i in range(1, len(boxes)):
-    if abs(boxes[i][0] - boxes[i - 1][0]) < 50:  # Adjust threshold as needed
-        current_column.append(boxes[i])
-    else:
-        columns.append(current_column)
-        current_column = [boxes[i]]
-columns.append(current_column)
+# Perform OCR on detected text blocks
+ocr_agent = lp.TesseractAgent(languages='eng')
 
-# Draw bounding boxes for each column and individual text blocks
-for column in columns:
-    for box in column:
-        x1, y1, x2, y2 = box
-        cv2.rectangle(image_rgb, (int(x1), int(y1)), (int(x2), int(y2)), (255, 0, 0), 2)
+for block in layout_result1:
+    # Crop image around the detected layout
+    segment_image = (block
+                     .pad(left=15, right=15, top=5, bottom=5)
+                     .crop_image(img))
+    
+    # Perform OCR
+    text = ocr_agent.detect(segment_image)
 
-# Save the output image
-output_image_path = "output_image_with_boxes.jpg"
-cv2.imwrite(output_image_path, cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR))  # Convert back to BGR for saving
+    # Save OCR result
+    block.set(text=text, inplace=True)
 
-print(f"Output image saved as: {output_image_path}")
+# Print the detected text
+# for txt in layout_result1:
+#     print("Text = ", txt.text)
+#     print("Coordinates = ", txt.coordinates)
+#     print("---")
