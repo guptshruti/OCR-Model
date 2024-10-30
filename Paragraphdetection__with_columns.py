@@ -1,6 +1,5 @@
 import numpy as np
 import layoutparser as lp
-import torch
 import cv2
 from craft_text_detector import Craft
 
@@ -20,8 +19,8 @@ config_paths = [
 # Load image
 img = cv2.imread(image_path)
 
-# Initialize CRAFT for text region detection
-craft = Craft(output_dir='./craft_output', crop_type="poly", cuda=True)
+# Initialize CRAFT for text region detection with CPU
+craft = Craft(output_dir='./craft_output', crop_type="poly", cuda=False)
 
 # Load all three models for ensemble
 models = [lp.Detectron2LayoutModel(config, model_path=path, extra_config=["MODEL.ROI_HEADS.SCORE_THRESH_TEST", 0.15], 
@@ -38,7 +37,7 @@ def ensemble_detection(models, image):
 def draw_boxes(image, layout, color_map):
     """Draw bounding boxes on the image based on the layout."""
     for block in layout:
-        block_type = block.type
+        block_type = getattr(block, 'type', "Text")  # Default type for CRAFT/contour boxes
         if block_type in color_map:
             x1, y1, x2, y2 = block.coordinates
             color = color_map[block_type]
@@ -48,9 +47,20 @@ def draw_boxes(image, layout, color_map):
     cv2.imwrite(output_image_path, image)
     print(f"Output image saved as: {output_image_path}")
 
-# Detect text-heavy regions with CRAFT
-craft_result = craft.detect_text(image_path)
-text_boxes = [lp.Rectangle(*box['box']) for box in craft_result["boxes"]]
+# Detect text-heavy regions with CRAFT and handle possible shape issues
+try:
+    craft_result = craft.detect_text(image_path)
+    text_boxes = []
+    
+    # Verify polygon shapes
+    for box in craft_result["boxes"]:
+        if isinstance(box['box'], (list, tuple)) and len(box['box']) == 4:
+            rect = lp.Rectangle(*box['box'])
+            rect.type = "Text"  # Assign type for compatibility with draw_boxes
+            text_boxes.append(rect)
+except ValueError as e:
+    print(f"Error in CRAFT detection: {e}")
+    text_boxes = []
 
 # Ensemble detection
 layout_result = ensemble_detection(models, img)
@@ -62,7 +72,12 @@ dilated = cv2.dilate(binary, np.ones((5, 5), np.uint8), iterations=1)
 contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
 # Convert contours to layout parser format
-contour_boxes = [lp.Rectangle(x, y, x+w, y+h) for cnt in contours for x, y, w, h in [cv2.boundingRect(cnt)]]
+contour_boxes = []
+for cnt in contours:
+    x, y, w, h = cv2.boundingRect(cnt)
+    rect = lp.Rectangle(x, y, x + w, y + h)
+    rect.type = "Text"  # Assign type for compatibility with draw_boxes
+    contour_boxes.append(rect)
 
 # Merge CRAFT and ensemble results
 merged_boxes = text_boxes + layout_result + contour_boxes
