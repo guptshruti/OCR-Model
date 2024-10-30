@@ -1,89 +1,83 @@
 import numpy as np
 import layoutparser as lp
 import cv2
-from craft_text_detector import Craft
 
-# Paths to your images and model configurations
-image_path = '/home/azureuser/lekhaanuvaad_processing/Test_images/Gazette_Page_01.jpg'
-model_paths = [
-    "/home/azureuser/lekhaanuvaad_processing/paragraph_detection/pretrained_model/model1.pth",
-    "/home/azureuser/lekhaanuvaad_processing/paragraph_detection/pretrained_model/model2.pth",
-    "/home/azureuser/lekhaanuvaad_processing/paragraph_detection/pretrained_model/model3.pth",
-]
-config_paths = [
-    "/home/azureuser/lekhaanuvaad_processing/paragraph_detection/pretrained_model/config1.yml",
-    "/home/azureuser/lekhaanuvaad_processing/paragraph_detection/pretrained_model/config2.yml",
-    "/home/azureuser/lekhaanuvaad_processing/paragraph_detection/pretrained_model/config3.yml",
-]
-
-# Load image
+# Update this path to your image
+image_path = '/home/azureuser/lekhaanuvaad_processing/Test_images/Gazette_Page_01.jpg'  
 img = cv2.imread(image_path)
 
-# Initialize CRAFT for text region detection with CPU
-craft = Craft(output_dir='./craft_output', crop_type="poly", cuda=False)
+# Load the Detectron2 layout model
+model = lp.Detectron2LayoutModel(
+    config_path="/home/azureuser/lekhaanuvaad_processing/paragraph_detection/pretrained_model/config1.yml",
+    model_path="/home/azureuser/lekhaanuvaad_processing/paragraph_detection/pretrained_model/model1.pth",
+    extra_config=["MODEL.ROI_HEADS.SCORE_THRESH_TEST", 0.5],  # Adjust threshold
+    label_map={0: "Text", 1: "Title", 2: "List", 3: "Table", 4: "Figure"}
+)
 
-# Load all three models for ensemble
-models = [lp.Detectron2LayoutModel(config, model_path=path, extra_config=["MODEL.ROI_HEADS.SCORE_THRESH_TEST", 0.15], 
-           label_map={0: "Text", 1: "Title", 2: "List", 3: "Table", 4: "Figure"}) for config, path in zip(config_paths, model_paths)]
+# Define color mapping for different types
+color_map = {
+    "Text": (255, 0, 0),  # Red for text blocks
+    "Title": (0, 255, 0),  # Green for titles (if needed)
+    "List": (0, 0, 255),  # Blue for lists (if needed)
+    "Table": (255, 255, 0),  # Cyan for tables
+    "Figure": (255, 0, 255)  # Magenta for figures
+}
 
-def ensemble_detection(models, image):
-    """Run the ensemble of models and aggregate results."""
-    all_blocks = []
-    for model in models:
-        layout = model.detect(image)
-        all_blocks.extend(layout)  # Aggregate detections from all models
-    return all_blocks
-
-def draw_boxes(image, layout, color_map):
+def draw_boxes(image, layout):
     """Draw bounding boxes on the image based on the layout."""
     for block in layout:
-        block_type = getattr(block, 'type', "Text")  # Default type for CRAFT/contour boxes
-        if block_type in color_map:
+        if block.type in color_map:  # Check if the block type is in our color map
             x1, y1, x2, y2 = block.coordinates
-            color = color_map[block_type]
-            cv2.rectangle(image, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
-            cv2.putText(image, block_type, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-    output_image_path = "output_image_ensemble.jpg"
+            color = color_map[block.type]
+            cv2.rectangle(image, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)  # Draw box
+            # Add text label
+            cv2.putText(image, block.type, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+    # Save the image with drawn boxes
+    output_image_path = "output_image_detectron.jpg"
     cv2.imwrite(output_image_path, image)
     print(f"Output image saved as: {output_image_path}")
 
-# Detect text-heavy regions with CRAFT and handle possible shape issues
-try:
-    craft_result = craft.detect_text(image_path)
-    text_boxes = []
+# Load the image and detect layout
+layout_result = model.detect(img)
+
+# Draw boxes on the original image
+draw_boxes(img.copy(), layout_result)
+
+# Function to merge nearby boxes to group text into paragraphs or columns
+def merge_boxes(layout, merge_threshold=15):
+    merged_boxes = []
+    for block in layout:
+        x_min, y_min, x_max, y_max = block.coordinates
+        merged = False
+        
+        # Check if this box should be merged with an existing box
+        for mbox in merged_boxes:
+            if (x_min < mbox[2] + merge_threshold and x_max > mbox[0] - merge_threshold and
+                y_min < mbox[3] + merge_threshold and y_max > mbox[1] - merge_threshold):
+                # Merge boxes
+                mbox[0] = min(mbox[0], x_min)
+                mbox[1] = min(mbox[1], y_min)
+                mbox[2] = max(mbox[2], x_max)
+                mbox[3] = max(mbox[3], y_max)
+                merged = True
+                break
+        if not merged:
+            merged_boxes.append([x_min, y_min, x_max, y_max])
     
-    # Verify polygon shapes
-    for box in craft_result["boxes"]:
-        if isinstance(box['box'], (list, tuple)) and len(box['box']) == 4:
-            rect = lp.Rectangle(*box['box'])
-            rect.type = "Text"  # Assign type for compatibility with draw_boxes
-            text_boxes.append(rect)
-except ValueError as e:
-    print(f"Error in CRAFT detection: {e}")
-    text_boxes = []
+    return merged_boxes
 
-# Ensemble detection
-layout_result = ensemble_detection(models, img)
+# Merge boxes for paragraph-level grouping
+merged_boxes = merge_boxes(layout_result)
 
-# Post-process with morphological operations
-gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-_, binary = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY_INV)
-dilated = cv2.dilate(binary, np.ones((5, 5), np.uint8), iterations=1)
-contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+# Draw merged boxes on image
+for (x_min, y_min, x_max, y_max) in merged_boxes:
+    cv2.rectangle(img, (int(x_min), int(y_min)), (int(x_max), int(y_max)), (255, 0, 0), 2)  # Red for merged boxes
 
-# Convert contours to layout parser format
-contour_boxes = []
-for cnt in contours:
-    x, y, w, h = cv2.boundingRect(cnt)
-    rect = lp.Rectangle(x, y, x + w, y + h)
-    rect.type = "Text"  # Assign type for compatibility with draw_boxes
-    contour_boxes.append(rect)
+# Save and display the output image with paragraph and column boundaries
+output_image_path = "output_image_paragraphs.jpg"
+cv2.imwrite(output_image_path, img)
+print(f"Output image saved as: {output_image_path}")
 
-# Merge CRAFT and ensemble results
-merged_boxes = text_boxes + layout_result + contour_boxes
-
-# Draw combined results
-draw_boxes(img.copy(), merged_boxes, color_map={"Text": (255, 0, 0), "Table": (255, 255, 0)})
-
-# Cleanup CRAFT files after detection
-craft.unload_craft_model()
+# Clean up the model resources
+del model
