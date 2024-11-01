@@ -8,7 +8,7 @@ def preprocess_image(img_path):
     img = cv2.imread(img_path)
     if img is None:
         raise ValueError(f"Image at path {img_path} could not be loaded.")
-    
+
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     img = cv2.resize(img, (800, int(img.shape[0] * 800 / img.shape[1])))  # Resize while maintaining aspect ratio
     return img
@@ -31,7 +31,7 @@ def draw_bounding_boxes(image, paragraphs):
         max_x = max(box[1][0] for box in paragraph)
         min_y = min(box[0][1] for box in paragraph)
         max_y = max(box[2][1] for box in paragraph)
-        
+
         # Draw rectangle around the paragraph
         cv2.rectangle(image, (int(min_x), int(min_y)), (int(max_x), int(max_y)), (0, 255, 0), 2)  # Green box
     return image
@@ -43,13 +43,13 @@ def inpaint_paragraphs_and_columns(img_path, pipeline):
 
     # Extract word boxes
     boxes = [box for _, box in prediction_groups[0]]
-    
+
     # Calculate median distances
     median_vertical_distance = get_median_distance(boxes, axis=0)
     median_horizontal_distance = get_median_distance(boxes, axis=1)
-    
+
     threshold_y = median_vertical_distance * 1.5  # Vertical threshold for paragraphs
-    threshold_x = median_horizontal_distance * 0.1  # Horizontal threshold for columns
+    threshold_x = median_horizontal_distance * 0.3  # Increased horizontal threshold for columns
 
     paragraphs = []
     current_paragraph = []
@@ -68,19 +68,20 @@ def inpaint_paragraphs_and_columns(img_path, pipeline):
             last_column_box = current_column[-1]
             horizontal_distance = box[0][0] - last_column_box[1][0]  # Start of current box - End of last column box
 
-            if vertical_distance > threshold_y:
-                # If vertical distance exceeds threshold, finalize the current paragraph
-                paragraphs.append(current_paragraph)
-                current_paragraph = [box]  # Start a new paragraph
-                current_column = [box]  # Start a new column
-            elif horizontal_distance > threshold_x:
-                # If horizontal distance exceeds threshold, finalize the current column
+            if horizontal_distance > threshold_x:
+                # Finalize the current column and reset for new column
                 columns.append(current_column)
                 current_column = [box]  # Start a new column
-                current_paragraph.append(box)  # Add to the current paragraph
+                paragraphs.append(current_paragraph)  # Finalize the paragraph in the current column
+                current_paragraph = [box]
+            elif vertical_distance > threshold_y:
+                # Finalize the current paragraph in the same column
+                paragraphs.append(current_paragraph)
+                current_paragraph = [box]  # Start a new paragraph
             else:
-                current_paragraph.append(box)  # Continue adding to the current paragraph
-                current_column.append(box)  # Continue adding to the current column
+                # Continue adding to the current paragraph and column
+                current_paragraph.append(box)
+                current_column.append(box)
 
     if current_paragraph:
         paragraphs.append(current_paragraph)  # Add the last paragraph
@@ -96,16 +97,16 @@ def save_paragraph_images(img, paragraphs, output_folder):
         max_x = max(box[1][0] for box in paragraph)
         min_y = min(box[0][1] for box in paragraph)
         max_y = max(box[2][1] for box in paragraph)
-        
+
         cropped_img = img[int(min_y):int(max_y), int(min_x):int(max_x)]
-        #cv2.imwrite(f"{output_folder}/paragraph_{i + 1}.png", cv2.cvtColor(cropped_img, cv2.COLOR_RGB2BGR))
+        cv2.imwrite(f"{output_folder}/paragraph_{i + 1}.png", cv2.cvtColor(cropped_img, cv2.COLOR_RGB2BGR))
 
 def paragraph_detection(input_image, output_folder):
     """Main function to detect paragraphs in the document."""
     # Initialize the keras-ocr pipeline
     pipeline = keras_ocr.pipeline.Pipeline()
 
-    # Process the image to get paragraph coordinates
+    # Process the image to get paragraph and column coordinates
     img_paragraphs, paragraphs, columns = inpaint_paragraphs_and_columns(input_image, pipeline)
 
     # Draw bounding boxes on the original image
