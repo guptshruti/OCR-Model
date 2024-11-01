@@ -1,83 +1,127 @@
-import numpy as np
-import layoutparser as lp
+import os
 import cv2
+import numpy as np
+import keras_ocr
 
-# Update this path to your image
-image_path = '/home/azureuser/lekhaanuvaad_processing/Test_images/Gazette_Page_01.jpg'  
-img = cv2.imread(image_path)
-
-# Load the Detectron2 layout model
-model = lp.Detectron2LayoutModel(
-    config_path="/home/azureuser/lekhaanuvaad_processing/paragraph_detection/pretrained_model/config1.yml",
-    model_path="/home/azureuser/lekhaanuvaad_processing/paragraph_detection/pretrained_model/model1.pth",
-    extra_config=["MODEL.ROI_HEADS.SCORE_THRESH_TEST", 0.5],  # Adjust threshold
-    label_map={0: "Text", 1: "Title", 2: "List", 3: "Table", 4: "Figure"}
-)
-
-# Define color mapping for different types
-color_map = {
-    "Text": (255, 0, 0),  # Red for text blocks
-    "Title": (0, 255, 0),  # Green for titles (if needed)
-    "List": (0, 0, 255),  # Blue for lists (if needed)
-    "Table": (255, 255, 0),  # Cyan for tables
-    "Figure": (255, 0, 255)  # Magenta for figures
-}
-
-def draw_boxes(image, layout):
-    """Draw bounding boxes on the image based on the layout."""
-    for block in layout:
-        if block.type in color_map:  # Check if the block type is in our color map
-            x1, y1, x2, y2 = block.coordinates
-            color = color_map[block.type]
-            cv2.rectangle(image, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)  # Draw box
-            # Add text label
-            cv2.putText(image, block.type, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-
-    # Save the image with drawn boxes
-    output_image_path = "output_image_detectron.jpg"
-    cv2.imwrite(output_image_path, image)
-    print(f"Output image saved as: {output_image_path}")
-
-# Load the image and detect layout
-layout_result = model.detect(img)
-
-# Draw boxes on the original image
-draw_boxes(img.copy(), layout_result)
-
-# Function to merge nearby boxes to group text into paragraphs or columns
-def merge_boxes(layout, merge_threshold=15):
-    merged_boxes = []
-    for block in layout:
-        x_min, y_min, x_max, y_max = block.coordinates
-        merged = False
-        
-        # Check if this box should be merged with an existing box
-        for mbox in merged_boxes:
-            if (x_min < mbox[2] + merge_threshold and x_max > mbox[0] - merge_threshold and
-                y_min < mbox[3] + merge_threshold and y_max > mbox[1] - merge_threshold):
-                # Merge boxes
-                mbox[0] = min(mbox[0], x_min)
-                mbox[1] = min(mbox[1], y_min)
-                mbox[2] = max(mbox[2], x_max)
-                mbox[3] = max(mbox[3], y_max)
-                merged = True
-                break
-        if not merged:
-            merged_boxes.append([x_min, y_min, x_max, y_max])
+def preprocess_image(img_path):
+    """Preprocess the image for better detection."""
+    img = cv2.imread(img_path)
+    if img is None:
+        raise ValueError(f"Image at path {img_path} could not be loaded.")
     
-    return merged_boxes
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    img = cv2.resize(img, (800, int(img.shape[0] * 800 / img.shape[1])))  # Resize while maintaining aspect ratio
+    return img
 
-# Merge boxes for paragraph-level grouping
-merged_boxes = merge_boxes(layout_result)
+def get_median_distance(boxes, axis=0):
+    """Calculate the median distance between boxes along a specified axis (0 for vertical, 1 for horizontal)."""
+    distances = []
+    for i in range(len(boxes) - 1):
+        if axis == 0:  # Vertical distance
+            distance = abs(boxes[i][0][1] - boxes[i + 1][0][1])  # y-coordinates
+        else:  # Horizontal distance
+            distance = abs(boxes[i][1][0] - boxes[i + 1][0][0])  # x-coordinates
+        distances.append(distance)
+    return np.median(distances) if distances else 0
 
-# Draw merged boxes on image
-for (x_min, y_min, x_max, y_max) in merged_boxes:
-    cv2.rectangle(img, (int(x_min), int(y_min)), (int(x_max), int(y_max)), (255, 0, 0), 2)  # Red for merged boxes
+def draw_bounding_boxes(image, paragraphs):
+    """Draw bounding boxes around detected paragraphs on the image."""
+    for paragraph in paragraphs:
+        min_x = min(box[0][0] for box in paragraph)
+        max_x = max(box[1][0] for box in paragraph)
+        min_y = min(box[0][1] for box in paragraph)
+        max_y = max(box[2][1] for box in paragraph)
+        
+        # Draw rectangle around the paragraph
+        cv2.rectangle(image, (int(min_x), int(min_y)), (int(max_x), int(max_y)), (0, 255, 0), 2)  # Green box
+    return image
 
-# Save and display the output image with paragraph and column boundaries
-output_image_path = "output_image_paragraphs.jpg"
-cv2.imwrite(output_image_path, img)
-print(f"Output image saved as: {output_image_path}")
+def inpaint_paragraphs_and_columns(img_path, pipeline):
+    """Detect paragraphs and columns based on distances between word boxes."""
+    img = preprocess_image(img_path)
+    prediction_groups = pipeline.recognize([img])
 
-# Clean up the model resources
-del model
+    # Extract word boxes
+    boxes = [box for _, box in prediction_groups[0]]
+    
+    # Calculate median distances
+    median_vertical_distance = get_median_distance(boxes, axis=0)
+    median_horizontal_distance = get_median_distance(boxes, axis=1)
+    
+    threshold_y = median_vertical_distance * 1.5  # Vertical threshold for paragraphs
+    threshold_x = median_horizontal_distance * 0.1  # Horizontal threshold for columns
+
+    paragraphs = []
+    current_paragraph = []
+    columns = []
+    current_column = []
+
+    for i, (word, box) in enumerate(prediction_groups[0]):
+        if not current_paragraph:
+            current_paragraph.append(box)
+            current_column.append(box)
+        else:
+            last_box = current_paragraph[-1]
+            vertical_distance = box[0][1] - last_box[2][1]  # Start of current box - End of last box
+
+            # Check if the current box is in the same column
+            last_column_box = current_column[-1]
+            horizontal_distance = box[0][0] - last_column_box[1][0]  # Start of current box - End of last column box
+
+            if vertical_distance > threshold_y:
+                # If vertical distance exceeds threshold, finalize the current paragraph
+                paragraphs.append(current_paragraph)
+                current_paragraph = [box]  # Start a new paragraph
+                current_column = [box]  # Start a new column
+            elif horizontal_distance > threshold_x:
+                # If horizontal distance exceeds threshold, finalize the current column
+                columns.append(current_column)
+                current_column = [box]  # Start a new column
+                current_paragraph.append(box)  # Add to the current paragraph
+            else:
+                current_paragraph.append(box)  # Continue adding to the current paragraph
+                current_column.append(box)  # Continue adding to the current column
+
+    if current_paragraph:
+        paragraphs.append(current_paragraph)  # Add the last paragraph
+    if current_column:
+        columns.append(current_column)  # Add the last column
+
+    return img, paragraphs, columns
+
+def save_paragraph_images(img, paragraphs, output_folder):
+    """Save images of detected paragraphs."""
+    for i, paragraph in enumerate(paragraphs):
+        min_x = min(box[0][0] for box in paragraph)
+        max_x = max(box[1][0] for box in paragraph)
+        min_y = min(box[0][1] for box in paragraph)
+        max_y = max(box[2][1] for box in paragraph)
+        
+        cropped_img = img[int(min_y):int(max_y), int(min_x):int(max_x)]
+        #cv2.imwrite(f"{output_folder}/paragraph_{i + 1}.png", cv2.cvtColor(cropped_img, cv2.COLOR_RGB2BGR))
+
+def paragraph_detection(input_image, output_folder):
+    """Main function to detect paragraphs in the document."""
+    # Initialize the keras-ocr pipeline
+    pipeline = keras_ocr.pipeline.Pipeline()
+
+    # Process the image to get paragraph coordinates
+    img_paragraphs, paragraphs, columns = inpaint_paragraphs_and_columns(input_image, pipeline)
+
+    # Draw bounding boxes on the original image
+    img_with_boxes = draw_bounding_boxes(img_paragraphs.copy(), paragraphs)
+
+    # Save the output image with bounding boxes
+    output_image_path = f"{output_folder}/bounding_boxes.png"
+    cv2.imwrite(output_image_path, cv2.cvtColor(img_with_boxes, cv2.COLOR_RGB2BGR))
+
+    # Save paragraph images
+    save_paragraph_images(img_paragraphs, paragraphs, output_folder)
+
+    print("Paragraph images and bounding boxes saved to:", output_folder)
+
+
+if __name__ == "__main__":
+    input_image_path = "/home/azureuser/lekhaanuvaad_processing/Test_images/test_english_final/2column.png"  # Update with your image path
+    output_folder = "/home/azureuser/lekhaanuvaad_processing/paragraph_detection/output_column"  # Update with your output folder path
+    paragraph_detection(input_image_path, output_folder)
