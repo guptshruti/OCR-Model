@@ -124,7 +124,11 @@ def draw_paragraph_bounding_boxes(image, column_paragraphs):
                 cv2.rectangle(image, (int(min_x), int(min_y)), (int(max_x), int(max_y)), (0, 255, 0), 2)  # Green box
             else:
                 print(f"Warning: No valid bounding box found for paragraph {paragraph_index} in column {column_index}, skipping drawing")
-
+        print("Column Paragraphs Structure:")
+        for i, column in enumerate(column_paragraphs):
+            print(f"Column {i}:")
+        for j, paragraph in enumerate(column):
+            print(f"  Paragraph {j}: {paragraph}")
     return image
 
 
@@ -158,6 +162,7 @@ def paragraph_detection(input_image, output_folder):
     print("Paragraph bounding boxes saved to:", output_image_path)
 
 if __name__ == "__main__":
-    input_image_path = "/home/azureuser/lekhaanuvaad_processing/Test_images/Gazette_Page_09.jpg"  # Update with your image path
+    input_image_path = "/home/azureuser/lekhaanuvaad_processing/Test_images/test_english_final/2column.png"  # Update with your image path
     output_folder = "/home/azureuser/lekhaanuvaad_processing/paragraph_detection/output_column"  # Update with your output folder path
     paragraph_detection(input_image_path, output_folder)
+    
