@@ -1,172 +1,119 @@
-import os
+import keras_ocr
 import cv2
 import numpy as np
-import keras_ocr
 from sklearn.cluster import DBSCAN
 
-def preprocess_image(img_path):
-    """Preprocess the image for better detection."""
-    img = cv2.imread(img_path)
-    if img is None:
-        raise ValueError(f"Image at path {img_path} could not be loaded.")
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    img = cv2.resize(img, (800, int(img.shape[0] * 800 / img.shape[1])))  # Resize while maintaining aspect ratio
-    return img
+# Initialize the keras-ocr pipeline
+pipeline = keras_ocr.pipeline.Pipeline()
 
-def get_column_boundaries(img, min_gap_width=50):
-    """Detect column boundaries using vertical projection profiling."""
-    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    _, binary = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY_INV)
+def extract_words(image):
+    """Use keras-ocr to detect words in the image and return their bounding boxes."""
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    prediction_groups = pipeline.recognize([image_rgb])
+    word_boxes = []
+    for words in prediction_groups:
+        for word in words:
+            box, text = word[1], word[0]
+            x_min = int(min(box[:, 0]))
+            y_min = int(min(box[:, 1]))
+            width = int(max(box[:, 0]) - x_min)
+            height = int(max(box[:, 1]) - y_min)
+            word_boxes.append((x_min, y_min, width, height, text))
+    return word_boxes
 
-    # Sum intensities vertically to detect gaps
-    vertical_projection = np.sum(binary, axis=0)
-    column_boundaries = []
-    in_column = False
-    start = 0
+def calculate_distances(word_boxes):
+    """Calculate horizontal and vertical distances between word boxes."""
+    distances = []
+    for i in range(len(word_boxes)):
+        for j in range(i + 1, len(word_boxes)):
+            # Extract bounding boxes
+            x1, y1, w1, h1, _ = word_boxes[i]
+            x2, y2, w2, h2, _ = word_boxes[j]
+            
+            # Calculate horizontal distance
+            h_dist = abs(x1 - (x2 + w2))
+            # Calculate vertical distance
+            v_dist = abs(y1 - y2)
+            distances.append((i, j, h_dist, v_dist))
+    return distances
 
-    for i, val in enumerate(vertical_projection):
-        if val > 0 and not in_column:
-            start = i
-            in_column = True
-        elif val == 0 and in_column:
-            if i - start > min_gap_width:
-                column_boundaries.append((start, i))
-            in_column = False
+def calculate_dynamic_thresholds(word_boxes):
+    """Calculate dynamic horizontal and vertical thresholds based on word distances."""
+    h_dists = []
+    v_dists = []
 
-    if not column_boundaries:
-        print("Warning: No column boundaries detected.")
-    return column_boundaries
+    # Collect distances to calculate thresholds
+    for i in range(len(word_boxes)):
+        for j in range(i + 1, len(word_boxes)):
+            # Extract bounding boxes
+            x1, y1, w1, h1, _ = word_boxes[i]
+            x2, y2, w2, h2, _ = word_boxes[j]
+            h_dist = abs(x1 - (x2 + w2))
+            v_dist = abs(y1 - y2)
 
-def group_words_by_columns_and_lines(prediction_groups, column_boundaries, line_eps=20):
-    """Group words by columns and then into lines."""
-    columns = [[] for _ in range(len(column_boundaries))]
+            h_dists.append(h_dist)
+            v_dists.append(v_dist)
 
-    for word, box in prediction_groups[0]:
-        if not isinstance(box, np.ndarray) or box.shape != (4, 2):
-            print(f"Warning: Invalid box format for word '{word}', skipping")
-            continue
+    # Calculate dynamic thresholds
+    h_threshold = np.percentile(h_dists, 75) if h_dists else 50  # Use 75th percentile as threshold
+    v_threshold = np.percentile(v_dists, 75) if v_dists else 20  # Use 75th percentile as threshold
+
+    return h_threshold, v_threshold
+
+def cluster_words(word_boxes, distances, h_threshold, v_threshold):
+    """Cluster words using DBSCAN based on calculated distances."""
+    # Prepare data for clustering
+    distance_matrix = []
+    for _, _, h_dist, v_dist in distances:
+        distance_matrix.append([h_dist, v_dist])
+    
+    # Apply DBSCAN clustering
+    if distance_matrix:
+        clustering = DBSCAN(eps=h_threshold, min_samples=1).fit(distance_matrix)
+        clusters = [[] for _ in range(max(clustering.labels_) + 1)]
         
-        x_center = (box[0][0] + box[1][0]) / 2
-        y_center = (box[0][1] + box[2][1]) / 2
-
-        # Place word in the corresponding column based on x_center
-        placed = False
-        for i, (start, end) in enumerate(column_boundaries):
-            if start <= x_center < end:
-                columns[i].append((word, box, y_center))
-                placed = True
-                break
-        if not placed:
-            print(f"Warning: Word '{word}' at ({x_center}, {y_center}) does not fit into any column boundary.")
-
-    # Separate lines within each column
-    column_paragraphs = []
-    for col in columns:
-        if not col:
-            continue  # Skip empty columns
-
-        # Cluster words into lines within the column based on y-coordinates
-        y_coords = np.array([word[2] for word in col]).reshape(-1, 1)
-        clustering = DBSCAN(eps=line_eps, min_samples=1).fit(y_coords)
-
-        # Group words into lines
-        lines_in_column = {}
         for idx, label in enumerate(clustering.labels_):
-            if label not in lines_in_column:
-                lines_in_column[label] = []
-            lines_in_column[label].append(col[idx])
+            clusters[label].append(distances[idx][0])  # Append the word index
 
-        # Sort lines by y-coordinate
-        sorted_lines = sorted(lines_in_column.values(), key=lambda line: min(word[2] for word in line))
+        return clusters
+    return []
 
-        # Group lines into paragraphs based on vertical spacing
-        paragraphs = []
-        current_paragraph = [sorted_lines[0]]
+def draw_bounding_boxes(image, word_boxes, clusters):
+    """Draw bounding boxes for each cluster."""
+    for cluster in clusters:
+        # Calculate overall bounding box for the cluster
+        x_min = min(word_boxes[i][0] for i in cluster)
+        y_min = min(word_boxes[i][1] for i in cluster)
+        x_max = max(word_boxes[i][0] + word_boxes[i][2] for i in cluster)
+        y_max = max(word_boxes[i][1] + word_boxes[i][3] for i in cluster)
 
-        for i in range(1, len(sorted_lines)):
-            # Calculate vertical distance between consecutive lines
-            previous_line_y = max(word[2] for word in sorted_lines[i-1])
-            current_line_y = min(word[2] for word in sorted_lines[i])
-            line_spacing = current_line_y - previous_line_y
+        # Draw a rectangle around the cluster
+        cv2.rectangle(image, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
 
-            # Adjust this threshold based on your document's line and paragraph spacing
-            if line_spacing < 30:  # Small spacing, consider it part of the same paragraph
-                current_paragraph.append(sorted_lines[i])
-            else:  # Larger spacing, create a new paragraph
-                paragraphs.append(current_paragraph)
-                current_paragraph = [sorted_lines[i]]
+def process_document(image_path):
+    """Main processing function for the document."""
+    # Load the image
+    image = cv2.imread(image_path)
 
-        paragraphs.append(current_paragraph)
-        column_paragraphs.append(paragraphs)
+    # Step 1: Extract words using keras-ocr
+    word_boxes = extract_words(image)
 
-    return column_paragraphs
+    # Step 2: Calculate distances
+    distances = calculate_distances(word_boxes)
 
-def draw_paragraph_bounding_boxes(image, column_paragraphs):
-    """Draw bounding boxes around paragraphs for each column."""
-    for column_index, column in enumerate(column_paragraphs):
-        for paragraph_index, paragraph in enumerate(column):
-            # Initialize variables for bounding box coordinates
-            min_x, max_x = float('inf'), float('-inf')
-            min_y, max_y = float('inf'), float('-inf')
+    # Step 3: Calculate dynamic thresholds
+    horizontal_threshold, vertical_threshold = calculate_dynamic_thresholds(word_boxes)
 
-            # Calculate bounding box around the entire paragraph
-            for line in paragraph:
-                for word, box, _ in line:
-                    # Ensure box is a list with exactly four points
-                    if isinstance(box, np.ndarray) and box.shape == (4, 2):
-                        # Calculate the min and max coordinates
-                        min_x = min(min_x, *[box[i][0] for i in range(4)])
-                        max_x = max(max_x, *[box[i][0] for i in range(4)])
-                        min_y = min(min_y, *[box[i][1] for i in range(4)])
-                        max_y = max(max_y, *[box[i][1] for i in range(4)])
-                    else:
-                        print(f"Warning: Invalid box format for word '{word}', skipping")
+    # Step 4: Cluster words based on thresholds
+    clusters = cluster_words(word_boxes, distances, horizontal_threshold, vertical_threshold)
 
-            # Check if valid bounding box was found before drawing
-            if min_x < float('inf') and max_x > float('-inf') and min_y < float('inf') and max_y > float('-inf'):
-                # Draw the bounding box around the paragraph
-                cv2.rectangle(image, (int(min_x), int(min_y)), (int(max_x), int(max_y)), (0, 255, 0), 2)  # Green box
-            else:
-                print(f"Warning: No valid bounding box found for paragraph {paragraph_index} in column {column_index}, skipping drawing")
+    # Step 5: Draw bounding boxes for clusters
+    draw_bounding_boxes(image, word_boxes, clusters)
 
-        print("Column Paragraphs Structure:")
-        for i, column in enumerate(column_paragraphs):
-            print(f"Column {i}:")
-            for j, paragraph in enumerate(column):
-                print(f"  Paragraph {j}: {paragraph}")
+    # Show or save the result
+    cv2.imshow('Document Processing', image)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
 
-    return image
-
-def inpaint_paragraphs_and_columns(img_path, pipeline):
-    """Detect paragraphs and columns in the document."""
-    img = preprocess_image(img_path)
-    prediction_groups = pipeline.recognize([img])
-
-    # Detect column boundaries
-    column_boundaries = get_column_boundaries(img)
-
-    # Group words by columns and lines to form paragraphs
-    column_paragraphs = group_words_by_columns_and_lines(prediction_groups, column_boundaries)
-
-    return img, column_paragraphs
-
-def paragraph_detection(input_image, output_folder):
-    """Main function to detect paragraphs in the document."""
-    pipeline = keras_ocr.pipeline.Pipeline()
-
-    # Process the image to get paragraph coordinates
-    img_paragraphs, column_paragraphs = inpaint_paragraphs_and_columns(input_image, pipeline)
-
-    # Draw bounding boxes on the original image
-    img_with_boxes = draw_paragraph_bounding_boxes(img_paragraphs.copy(), column_paragraphs)
-
-    # Save the output image with bounding boxes
-    output_image_path = os.path.join(output_folder, "paragraph_bounding_boxes.png")
-    cv2.imwrite(output_image_path, cv2.cvtColor(img_with_boxes, cv2.COLOR_RGB2BGR))
-
-    print("Paragraph bounding boxes saved to:", output_image_path)
-
-if __name__ == "__main__":
-    input_image_path = "/home/azureuser/lekhaanuvaad_processing/Test_images/test_english_final/2column.png"  # Update with your image path
-    output_folder = "/home/azureuser/lekhaanuvaad_processing/paragraph_detection/output_column"  # Update with your output folder path
-    paragraph_detection(input_image_path, output_folder)
+# Example usage
+process_document('path_to_your_document_image.jpg')
