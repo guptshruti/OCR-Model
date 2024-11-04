@@ -44,16 +44,20 @@ def extract_words_by_column_and_line(prediction_groups, column_boundaries, line_
         y_center = (box[0][1] + box[2][1]) / 2
 
         # Place word in the corresponding column based on x_center
+        placed = False
         for i, (start, end) in enumerate(column_boundaries):
             if start <= x_center < end:
                 columns[i].append((word, box, y_center))
+                placed = True
                 break
+        if not placed:
+            print(f"Warning: Word '{word}' at ({x_center}, {y_center}) does not fit into any column boundary.")
 
     # Further divide each column into lines using y-coordinates
     column_lines = []
     for col in columns:
         if not col:
-            continue
+            continue  # Skip empty columns
         y_coords = np.array([box[2] for word, box, y in col]).reshape(-1, 1)
         clustering = DBSCAN(eps=line_eps, min_samples=1).fit(y_coords)
 
