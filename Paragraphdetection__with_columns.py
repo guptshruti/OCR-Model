@@ -99,17 +99,34 @@ def group_words_by_columns_and_lines(prediction_groups, column_boundaries, line_
 
 def draw_paragraph_bounding_boxes(image, column_paragraphs):
     """Draw bounding boxes around paragraphs for each column."""
-    for column in column_paragraphs:
-        for paragraph in column:
+    for column_index, column in enumerate(column_paragraphs):
+        for paragraph_index, paragraph in enumerate(column):
+            # Initialize variables for bounding box coordinates
+            min_x, max_x = float('inf'), float('-inf')
+            min_y, max_y = float('inf'), float('-inf')
+
             # Calculate bounding box around the entire paragraph
-            min_x = min(word[1][i][0] for line in paragraph for word, _, _ in line for i in range(4))
-            max_x = max(word[1][i][0] for line in paragraph for word, _, _ in line for i in range(4))
-            min_y = min(word[1][i][1] for line in paragraph for word, _, _ in line for i in range(4))
-            max_y = max(word[1][i][1] for line in paragraph for word, _, _ in line for i in range(4))
+            for line in paragraph:
+                for word, box, _ in line:
+                    # Ensure box is a list with exactly four points
+                    if isinstance(box, list) and len(box) == 4:
+                        # Calculate the min and max coordinates
+                        min_x = min(min_x, *[box[i][0] for i in range(4)])
+                        max_x = max(max_x, *[box[i][0] for i in range(4)])
+                        min_y = min(min_y, *[box[i][1] for i in range(4)])
+                        max_y = max(max_y, *[box[i][1] for i in range(4)])
+                    else:
+                        print(f"Warning: Invalid box format for word '{word}', skipping")
             
-            # Draw the bounding box around the paragraph
-            cv2.rectangle(image, (int(min_x), int(min_y)), (int(max_x), int(max_y)), (0, 255, 0), 2)  # Green box
+            # Check if valid bounding box was found before drawing
+            if min_x < float('inf') and max_x > float('-inf') and min_y < float('inf') and max_y > float('-inf'):
+                # Draw the bounding box around the paragraph
+                cv2.rectangle(image, (int(min_x), int(min_y)), (int(max_x), int(max_y)), (0, 255, 0), 2)  # Green box
+            else:
+                print(f"Warning: No valid bounding box found for paragraph {paragraph_index} in column {column_index}, skipping drawing")
+
     return image
+
 
 def inpaint_paragraphs_and_columns(img_path, pipeline):
     """Detect paragraphs and columns in the document."""
