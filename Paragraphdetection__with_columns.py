@@ -1,113 +1,133 @@
+import os
 import cv2
 import numpy as np
-import layoutparser as lp
-from doctr.models import ocr_predictor
-from doctr.io import DocumentFile
+import keras_ocr
+from sklearn.cluster import DBSCAN
 
-# Load the PubLayNet model from LayoutParser
-model = lp.Detectron2LayoutModel(
-    config_path="lp://PubLayNet/faster_rcnn_R_50_FPN_3x/config", 
-    model_path="lp://PubLayNet/faster_rcnn_R_50_FPN_3x/model",
-    extra_config=["MODEL.ROI_HEADS.SCORE_THRESH_TEST", 0.3],  # Adjusted threshold
-    label_map={0: "Text", 1: "Title", 2: "List", 3: "Table", 4: "Figure"}
-)
-
-# Initialize the CRAFT text detector
-craft_detector = lp.models.CRAFT()
-
-def load_image(img_path):
-    image = cv2.imread(img_path)
-    if image is None:
+def preprocess_image(img_path):
+    """Preprocess the image for better detection."""
+    img = cv2.imread(img_path)
+    if img is None:
         raise ValueError(f"Image at path {img_path} could not be loaded.")
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    img = cv2.resize(img, (800, int(img.shape[0] * 800 / img.shape[1])))  # Resize while maintaining aspect ratio
+    return img
+
+def get_column_boundaries(img, min_gap_width=50):
+    """Detect column boundaries using vertical projection profiling."""
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    _, binary = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY_INV)
+
+    # Sum intensities vertically to detect gaps
+    vertical_projection = np.sum(binary, axis=0)
+    column_boundaries = []
+    in_column = False
+    start = 0
+
+    for i, val in enumerate(vertical_projection):
+        if val > 0 and not in_column:
+            start = i
+            in_column = True
+        elif val == 0 and in_column:
+            if i - start > min_gap_width:
+                column_boundaries.append((start, i))
+            in_column = False
+
+    return column_boundaries
+
+def extract_words_by_column(prediction_groups, column_boundaries):
+    """Separate words into columns based on detected column boundaries."""
+    columns = [[] for _ in range(len(column_boundaries))]
+
+    for word, box in prediction_groups[0]:
+        x_center = (box[0][0] + box[1][0]) / 2
+        for i, (start, end) in enumerate(column_boundaries):
+            if start <= x_center < end:
+                columns[i].append(box)
+                break
+
+    return columns
+
+def cluster_paragraphs(column_words, eps=20, min_samples=2):
+    """Cluster words into paragraphs within each column using DBSCAN."""
+    paragraphs = []
+    for boxes in column_words:
+        if not boxes:
+            continue
+        y_coords = np.array([box[0][1] for box in boxes]).reshape(-1, 1)
+        clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(y_coords)
+
+        # Group words by cluster label
+        paragraph_dict = {}
+        for idx, label in enumerate(clustering.labels_):
+            if label == -1:
+                continue  # Ignore noise
+            if label not in paragraph_dict:
+                paragraph_dict[label] = []
+            paragraph_dict[label].append(boxes[idx])
+        
+        # Append paragraphs in current column
+        paragraphs.extend(paragraph_dict.values())
+    
+    return paragraphs
+
+def draw_bounding_boxes(image, paragraphs):
+    """Draw bounding boxes around detected paragraphs on the image."""
+    for paragraph in paragraphs:
+        min_x = min(box[0][0] for box in paragraph)
+        max_x = max(box[1][0] for box in paragraph)
+        min_y = min(box[0][1] for box in paragraph)
+        max_y = max(box[2][1] for box in paragraph)
+        cv2.rectangle(image, (int(min_x), int(min_y)), (int(max_x), int(max_y)), (0, 255, 0), 2)  # Green box
     return image
 
-def preprocess_image(image):
-    gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    blurred_image = cv2.GaussianBlur(gray_image, (5, 5), 0)
-    processed_image = cv2.adaptiveThreshold(blurred_image, 255, 
-                                             cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                             cv2.THRESH_BINARY, 11, 2)
-    return processed_image
+def save_paragraph_images(img, paragraphs, output_folder):
+    """Save images of detected paragraphs."""
+    for i, paragraph in enumerate(paragraphs):
+        min_x = min(box[0][0] for box in paragraph)
+        max_x = max(box[1][0] for box in paragraph)
+        min_y = min(box[0][1] for box in paragraph)
+        max_y = max(box[2][1] for box in paragraph)
 
-def detect_layout(image):
-    layout = model.detect(image)
-    print(f"Detected layout blocks: {layout}")  # Inspect detected layout
-    return layout
+        cropped_img = img[int(min_y):int(max_y), int(min_x):int(max_x)]
+        #cv2.imwrite(f"{output_folder}/paragraph_{i + 1}.png", cv2.cvtColor(cropped_img, cv2.COLOR_RGB2BGR))
 
-def merge_close_blocks(layout, distance_threshold=10):
-    merged_blocks = []
-    for block in layout:
-        if not merged_blocks:
-            merged_blocks.append(block)
-        else:
-            last_block = merged_blocks[-1]
-            if abs(last_block.coordinates[1] - block.coordinates[1]) < distance_threshold:
-                # Merge blocks logic here (simple average for merging)
-                last_block.coordinates = [
-                    min(last_block.coordinates[0], block.coordinates[0]),
-                    min(last_block.coordinates[1], block.coordinates[1]),
-                    max(last_block.coordinates[2], block.coordinates[2]),
-                    max(last_block.coordinates[3], block.coordinates[3]),
-                ]
-            else:
-                merged_blocks.append(block)
-    return merged_blocks
+def inpaint_paragraphs_and_columns(img_path, pipeline):
+    """Detect paragraphs and columns in the document."""
+    img = preprocess_image(img_path)
+    prediction_groups = pipeline.recognize([img])
 
-def process_layout(image, layout):
-    for block in layout:
-        if block.type == "Text":  # Match the correct type
-            print(f"Detected block: {block}")  # Debug print
-            x_1, y_1, x_2, y_2 = map(int, block.coordinates)
-            cv2.rectangle(image, (x_1, y_1), (x_2, y_2), (0, 255, 0), 2)
-    return image
+    # Detect column boundaries
+    column_boundaries = get_column_boundaries(img)
 
-def detect_textlines(image):
-    # Detect text lines using CRAFT
-    text_lines = craft_detector.detect(image)
-    return text_lines
+    # Separate words by columns
+    column_words = extract_words_by_column(prediction_groups, column_boundaries)
 
-def ocr_textlines(image, text_lines):
-    ocr_model = ocr_predictor("db_resnet50", "crnn_vgg16_bn", pretrained=True)
-    results = []
-    for line in text_lines:
-        x_1, y_1, x_2, y_2 = map(int, line.coordinates)
-        text_region = image[y_1:y_2, x_1:x_2]
-        doc = DocumentFile.from_images(text_region)
-        result = ocr_model(doc)
-        results.append(result)
-    return results
+    # Detect paragraphs within each column
+    paragraphs = cluster_paragraphs(column_words)
 
-def save_output(image, output_path):
-    cv2.imwrite(output_path, image)
-    print(f"Output saved at {output_path}")
+    return img, paragraphs
+
+def paragraph_detection(input_image, output_folder):
+    """Main function to detect paragraphs in the document."""
+    pipeline = keras_ocr.pipeline.Pipeline()
+
+    # Process the image to get paragraph coordinates
+    img_paragraphs, paragraphs = inpaint_paragraphs_and_columns(input_image, pipeline)
+
+    # Draw bounding boxes on the original image
+    img_with_boxes = draw_bounding_boxes(img_paragraphs.copy(), paragraphs)
+
+    # Save the output image with bounding boxes
+    output_image_path = f"{output_folder}/bounding_boxes.png"
+    cv2.imwrite(output_image_path, cv2.cvtColor(img_with_boxes, cv2.COLOR_RGB2BGR))
+
+    # Save paragraph images
+    save_paragraph_images(img_paragraphs, paragraphs, output_folder)
+
+    print("Paragraph images and bounding boxes saved to:", output_folder)
 
 if __name__ == "__main__":
-    img_path = '/mnt/data/17304896446951666356884000969127.jpg'  # Input image path
-    output_path = '/mnt/data/processed_output.jpg'
-
-    # Load and preprocess image
-    image = load_image(img_path)
-    preprocessed_image = preprocess_image(image)
-
-    # Detect layout
-    layout = detect_layout(preprocessed_image)
-    
-    # Optionally merge close blocks
-    merged_layout = merge_close_blocks(layout)
-
-    # Process and annotate layout blocks
-    processed_image = process_layout(image.copy(), merged_layout)
-
-    # Detect text lines using CRAFT
-    text_lines = detect_textlines(preprocessed_image)
-
-    # Perform OCR on detected text lines
-    ocr_results = ocr_textlines(preprocessed_image, text_lines)
-
-    # Save the output with detected layout blocks
-    save_output(processed_image, output_path)
-
-    # Print OCR results for each detected text line
-    for i, result in enumerate(ocr_results):
-        print(f"Text line {i}: {result}")
+    input_image_path = "/home/azureuser/lekhaanuvaad_processing/Test_images/Gazette_Page_09.jpg"  # Update with your image path
+    output_folder = "/home/azureuser/lekhaanuvaad_processing/paragraph_detection/output_column"  # Update with your output folder path
+    paragraph_detection(input_image_path, output_folder)
