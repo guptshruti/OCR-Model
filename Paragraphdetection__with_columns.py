@@ -37,8 +37,8 @@ def get_column_boundaries(img, min_gap_width=50):
         print("Warning: No column boundaries detected.")
     return column_boundaries
 
-def extract_words_by_column_and_line(prediction_groups, column_boundaries, line_eps=20):
-    """Separate words into columns and lines based on detected column boundaries."""
+def group_words_by_columns_and_lines(prediction_groups, column_boundaries, line_eps=20):
+    """Group words by columns and then into lines."""
     columns = [[] for _ in range(len(column_boundaries))]
 
     for word, box in prediction_groups[0]:
@@ -55,61 +55,61 @@ def extract_words_by_column_and_line(prediction_groups, column_boundaries, line_
         if not placed:
             print(f"Warning: Word '{word}' at ({x_center}, {y_center}) does not fit into any column boundary.")
 
-    # Further divide each column into lines using y-coordinates
-    column_lines = []
+    # Separate lines within each column
+    column_paragraphs = []
     for col in columns:
         if not col:
-            print("Skipping empty column.")
             continue  # Skip empty columns
 
+        # Cluster words into lines within the column based on y-coordinates
         y_coords = np.array([word[2] for word in col]).reshape(-1, 1)
-        if y_coords.size == 0:
-            print("Warning: No words found in this column after filtering.")
-            continue
-
         clustering = DBSCAN(eps=line_eps, min_samples=1).fit(y_coords)
 
+        # Group words into lines
         lines_in_column = {}
         for idx, label in enumerate(clustering.labels_):
             if label not in lines_in_column:
                 lines_in_column[label] = []
             lines_in_column[label].append(col[idx])
 
-        # Sort lines within column by y-coordinates
+        # Sort lines by y-coordinate
         sorted_lines = sorted(lines_in_column.values(), key=lambda line: min(word[2] for word in line))
-        column_lines.append(sorted_lines)
+        
+        # Group lines into paragraphs based on vertical spacing
+        paragraphs = []
+        current_paragraph = [sorted_lines[0]]
+        
+        for i in range(1, len(sorted_lines)):
+            # Calculate vertical distance between consecutive lines
+            previous_line_y = max(word[2] for word in sorted_lines[i-1])
+            current_line_y = min(word[2] for word in sorted_lines[i])
+            line_spacing = current_line_y - previous_line_y
+            
+            # Adjust this threshold based on your document's line and paragraph spacing
+            if line_spacing < 30:  # Small spacing, consider it part of the same paragraph
+                current_paragraph.append(sorted_lines[i])
+            else:  # Larger spacing, create a new paragraph
+                paragraphs.append(current_paragraph)
+                current_paragraph = [sorted_lines[i]]
+        
+        paragraphs.append(current_paragraph)
+        column_paragraphs.append(paragraphs)
 
-    return column_lines
+    return column_paragraphs
 
-def draw_bounding_boxes(image, column_lines):
-    """Draw bounding boxes around detected words in each line and column."""
-    for column in column_lines:
-        for line in column:
-            for word, box, _ in line:
-                min_x = min(box[i][0] for i in range(4))
-                max_x = max(box[i][0] for i in range(4))
-                min_y = min(box[i][1] for i in range(4))
-                max_y = max(box[i][1] for i in range(4))
-                cv2.rectangle(image, (int(min_x), int(min_y)), (int(max_x), int(max_y)), (0, 255, 0), 2)  # Green box
+def draw_paragraph_bounding_boxes(image, column_paragraphs):
+    """Draw bounding boxes around paragraphs for each column."""
+    for column in column_paragraphs:
+        for paragraph in column:
+            # Calculate bounding box around the entire paragraph
+            min_x = min(word[1][i][0] for line in paragraph for word, _, _ in line for i in range(4))
+            max_x = max(word[1][i][0] for line in paragraph for word, _, _ in line for i in range(4))
+            min_y = min(word[1][i][1] for line in paragraph for word, _, _ in line for i in range(4))
+            max_y = max(word[1][i][1] for line in paragraph for word, _, _ in line for i in range(4))
+            
+            # Draw the bounding box around the paragraph
+            cv2.rectangle(image, (int(min_x), int(min_y)), (int(max_x), int(max_y)), (0, 255, 0), 2)  # Green box
     return image
-
-def save_word_images(img, column_lines, output_folder):
-    """Save images of detected words."""
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
-
-    count = 1
-    for column in column_lines:
-        for line in column:
-            for word, box, _ in line:
-                min_x = min(box[i][0] for i in range(4))
-                max_x = max(box[i][0] for i in range(4))
-                min_y = min(box[i][1] for i in range(4))
-                max_y = max(box[i][1] for i in range(4))
-
-                cropped_img = img[int(min_y):int(max_y), int(min_x):int(max_x)]
-                cv2.imwrite(f"{output_folder}/word_{count}.png", cv2.cvtColor(cropped_img, cv2.COLOR_RGB2BGR))
-                count += 1
 
 def inpaint_paragraphs_and_columns(img_path, pipeline):
     """Detect paragraphs and columns in the document."""
@@ -119,29 +119,26 @@ def inpaint_paragraphs_and_columns(img_path, pipeline):
     # Detect column boundaries
     column_boundaries = get_column_boundaries(img)
 
-    # Separate words by columns and lines
-    column_lines = extract_words_by_column_and_line(prediction_groups, column_boundaries)
+    # Group words by columns and lines to form paragraphs
+    column_paragraphs = group_words_by_columns_and_lines(prediction_groups, column_boundaries)
 
-    return img, column_lines
+    return img, column_paragraphs
 
 def paragraph_detection(input_image, output_folder):
     """Main function to detect paragraphs in the document."""
     pipeline = keras_ocr.pipeline.Pipeline()
 
     # Process the image to get paragraph coordinates
-    img_paragraphs, column_lines = inpaint_paragraphs_and_columns(input_image, pipeline)
+    img_paragraphs, column_paragraphs = inpaint_paragraphs_and_columns(input_image, pipeline)
 
     # Draw bounding boxes on the original image
-    img_with_boxes = draw_bounding_boxes(img_paragraphs.copy(), column_lines)
+    img_with_boxes = draw_paragraph_bounding_boxes(img_paragraphs.copy(), column_paragraphs)
 
     # Save the output image with bounding boxes
-    output_image_path = f"{output_folder}/bounding_boxes.png"
+    output_image_path = f"{output_folder}/paragraph_bounding_boxes.png"
     cv2.imwrite(output_image_path, cv2.cvtColor(img_with_boxes, cv2.COLOR_RGB2BGR))
 
-    # Save each word as an image
-    save_word_images(img_paragraphs, column_lines, output_folder)
-
-    print("Word images and bounding boxes saved to:", output_folder)
+    print("Paragraph bounding boxes saved to:", output_image_path)
 
 if __name__ == "__main__":
     input_image_path = "/home/azureuser/lekhaanuvaad_processing/Test_images/Gazette_Page_09.jpg"  # Update with your image path
