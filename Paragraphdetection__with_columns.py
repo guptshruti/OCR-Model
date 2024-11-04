@@ -33,6 +33,8 @@ def get_column_boundaries(img, min_gap_width=50):
                 column_boundaries.append((start, i))
             in_column = False
 
+    if not column_boundaries:
+        print("Warning: No column boundaries detected.")
     return column_boundaries
 
 def extract_words_by_column_and_line(prediction_groups, column_boundaries, line_eps=20):
@@ -57,8 +59,14 @@ def extract_words_by_column_and_line(prediction_groups, column_boundaries, line_
     column_lines = []
     for col in columns:
         if not col:
+            print("Skipping empty column.")
             continue  # Skip empty columns
-        y_coords = np.array([box[2] for word, box, y in col]).reshape(-1, 1)
+
+        y_coords = np.array([word[2] for word in col]).reshape(-1, 1)
+        if y_coords.size == 0:
+            print("Warning: No words found in this column after filtering.")
+            continue
+
         clustering = DBSCAN(eps=line_eps, min_samples=1).fit(y_coords)
 
         lines_in_column = {}
