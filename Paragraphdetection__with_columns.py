@@ -42,6 +42,10 @@ def group_words_by_columns_and_lines(prediction_groups, column_boundaries, line_
     columns = [[] for _ in range(len(column_boundaries))]
 
     for word, box in prediction_groups[0]:
+        if not isinstance(box, np.ndarray) or box.shape != (4, 2):
+            print(f"Warning: Invalid box format for word '{word}', skipping")
+            continue
+        
         x_center = (box[0][0] + box[1][0]) / 2
         y_center = (box[0][1] + box[2][1]) / 2
 
@@ -74,24 +78,24 @@ def group_words_by_columns_and_lines(prediction_groups, column_boundaries, line_
 
         # Sort lines by y-coordinate
         sorted_lines = sorted(lines_in_column.values(), key=lambda line: min(word[2] for word in line))
-        
+
         # Group lines into paragraphs based on vertical spacing
         paragraphs = []
         current_paragraph = [sorted_lines[0]]
-        
+
         for i in range(1, len(sorted_lines)):
             # Calculate vertical distance between consecutive lines
             previous_line_y = max(word[2] for word in sorted_lines[i-1])
             current_line_y = min(word[2] for word in sorted_lines[i])
             line_spacing = current_line_y - previous_line_y
-            
+
             # Adjust this threshold based on your document's line and paragraph spacing
             if line_spacing < 30:  # Small spacing, consider it part of the same paragraph
                 current_paragraph.append(sorted_lines[i])
             else:  # Larger spacing, create a new paragraph
                 paragraphs.append(current_paragraph)
                 current_paragraph = [sorted_lines[i]]
-        
+
         paragraphs.append(current_paragraph)
         column_paragraphs.append(paragraphs)
 
@@ -109,7 +113,7 @@ def draw_paragraph_bounding_boxes(image, column_paragraphs):
             for line in paragraph:
                 for word, box, _ in line:
                     # Ensure box is a list with exactly four points
-                    if isinstance(box, list) and len(box) == 4:
+                    if isinstance(box, np.ndarray) and box.shape == (4, 2):
                         # Calculate the min and max coordinates
                         min_x = min(min_x, *[box[i][0] for i in range(4)])
                         max_x = max(max_x, *[box[i][0] for i in range(4)])
@@ -117,20 +121,21 @@ def draw_paragraph_bounding_boxes(image, column_paragraphs):
                         max_y = max(max_y, *[box[i][1] for i in range(4)])
                     else:
                         print(f"Warning: Invalid box format for word '{word}', skipping")
-            
+
             # Check if valid bounding box was found before drawing
             if min_x < float('inf') and max_x > float('-inf') and min_y < float('inf') and max_y > float('-inf'):
                 # Draw the bounding box around the paragraph
                 cv2.rectangle(image, (int(min_x), int(min_y)), (int(max_x), int(max_y)), (0, 255, 0), 2)  # Green box
             else:
                 print(f"Warning: No valid bounding box found for paragraph {paragraph_index} in column {column_index}, skipping drawing")
+
         print("Column Paragraphs Structure:")
         for i, column in enumerate(column_paragraphs):
             print(f"Column {i}:")
-        for j, paragraph in enumerate(column):
-            print(f"  Paragraph {j}: {paragraph}")
-    return image
+            for j, paragraph in enumerate(column):
+                print(f"  Paragraph {j}: {paragraph}")
 
+    return image
 
 def inpaint_paragraphs_and_columns(img_path, pipeline):
     """Detect paragraphs and columns in the document."""
@@ -156,7 +161,7 @@ def paragraph_detection(input_image, output_folder):
     img_with_boxes = draw_paragraph_bounding_boxes(img_paragraphs.copy(), column_paragraphs)
 
     # Save the output image with bounding boxes
-    output_image_path = f"{output_folder}/paragraph_bounding_boxes.png"
+    output_image_path = os.path.join(output_folder, "paragraph_bounding_boxes.png")
     cv2.imwrite(output_image_path, cv2.cvtColor(img_with_boxes, cv2.COLOR_RGB2BGR))
 
     print("Paragraph bounding boxes saved to:", output_image_path)
@@ -165,4 +170,3 @@ if __name__ == "__main__":
     input_image_path = "/home/azureuser/lekhaanuvaad_processing/Test_images/test_english_final/2column.png"  # Update with your image path
     output_folder = "/home/azureuser/lekhaanuvaad_processing/paragraph_detection/output_column"  # Update with your output folder path
     paragraph_detection(input_image_path, output_folder)
-    
