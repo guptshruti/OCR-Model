@@ -1,117 +1,94 @@
 import os
-import keras_ocr
 import cv2
 import numpy as np
+import keras_ocr
 from sklearn.cluster import DBSCAN
 
-# Initialize the keras-ocr pipeline
-pipeline = keras_ocr.pipeline.Pipeline()
+def preprocess_image(img_path):
+    """Preprocess the image for better detection."""
+    img = cv2.imread(img_path)
+    if img is None:
+        raise ValueError(f"Image at path {img_path} could not be loaded.")
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    img = cv2.resize(img, (800, int(img.shape[0] * 800 / img.shape[1])))  # Resize while maintaining aspect ratio
+    return img
 
-def extract_words(image):
-    """Use keras-ocr to detect words in the image and return their bounding boxes."""
-    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    prediction_groups = pipeline.recognize([image_rgb])
-    word_boxes = []
-    for words in prediction_groups:
-        for word in words:
-            box, text = word[1], word[0]
-            x_min = int(min(box[:, 0]))
-            y_min = int(min(box[:, 1]))
-            width = int(max(box[:, 0]) - x_min)
-            height = int(max(box[:, 1]) - y_min)
-            word_boxes.append((x_min, y_min, width, height, text))
-    return word_boxes
+def get_dynamic_thresholds(words_boxes):
+    """Calculate dynamic horizontal and vertical thresholds based on word spacing."""
+    horizontal_distances = []
+    vertical_distances = []
 
-def calculate_distances(word_boxes):
-    """Calculate horizontal and vertical distances between word boxes."""
-    distances = []
-    for i in range(len(word_boxes)):
-        for j in range(i + 1, len(word_boxes)):
-            x1, y1, w1, h1, _ = word_boxes[i]
-            x2, y2, w2, h2, _ = word_boxes[j]
-            h_dist = abs(x1 - (x2 + w2))
-            v_dist = abs(y1 - y2)
-            distances.append((i, j, h_dist, v_dist))
-    return distances
+    for i, (word, box) in enumerate(words_boxes):
+        x_center, y_center = np.mean(box, axis=0)
+        for j, (_, other_box) in enumerate(words_boxes):
+            if i == j:
+                continue
+            other_x_center, other_y_center = np.mean(other_box, axis=0)
+            horizontal_distances.append(abs(x_center - other_x_center))
+            vertical_distances.append(abs(y_center - other_y_center))
 
-def calculate_dynamic_thresholds(word_boxes):
-    """Calculate dynamic horizontal and vertical thresholds based on word distances."""
-    h_dists = []
-    v_dists = []
+    # Set dynamic thresholds based on percentiles to filter out extreme values
+    hor_threshold = np.percentile(horizontal_distances, 30)
+    ver_threshold = np.percentile(vertical_distances, 30)
+    return hor_threshold, ver_threshold
 
-    for i in range(len(word_boxes)):
-        for j in range(i + 1, len(word_boxes)):
-            x1, y1, w1, h1, _ = word_boxes[i]
-            x2, y2, w2, h2, _ = word_boxes[j]
-            h_dist = abs(x1 - (x2 + w2))
-            v_dist = abs(y1 - y2)
+def group_words_by_clusters(prediction_groups, hor_threshold, ver_threshold):
+    """Group words into clusters using dynamic thresholds."""
+    words_data = [(word, box) for word, box in prediction_groups[0]]
+    centers = np.array([np.mean(box, axis=0) for _, box in words_data])
 
-            h_dists.append(h_dist)
-            v_dists.append(v_dist)
+    # DBSCAN with dynamic horizontal and vertical thresholds
+    clustering = DBSCAN(eps=hor_threshold, min_samples=1, metric='euclidean').fit(centers)
+    labels = clustering.labels_
 
-    # Calculate thresholds
-    h_threshold = np.percentile(h_dists, 75) if h_dists else 50
-    v_threshold = np.percentile(v_dists, 75) if v_dists else 20
+    clusters = {}
+    for idx, label in enumerate(labels):
+        if label not in clusters:
+            clusters[label] = []
+        clusters[label].append(words_data[idx])
 
-    return h_threshold, v_threshold
+    # Sort clusters into paragraphs by average y-coordinate
+    sorted_clusters = [sorted(cluster, key=lambda word: np.mean(word[1], axis=0)[1]) for cluster in clusters.values()]
+    sorted_clusters.sort(key=lambda cluster: np.mean([np.mean(word[1], axis=0)[1] for word in cluster]))
 
-def cluster_words(word_boxes, distances, h_threshold, v_threshold):
-    """Cluster words using DBSCAN based on calculated distances."""
-    distance_matrix = []
-    for _, _, h_dist, v_dist in distances:
-        distance_matrix.append([h_dist, v_dist])
-    
-    if distance_matrix:
-        clustering = DBSCAN(eps=h_threshold, min_samples=1).fit(distance_matrix)
-        clusters = [[] for _ in range(max(clustering.labels_) + 1)]
-        
-        for idx, label in enumerate(clustering.labels_):
-            clusters[label].append(distances[idx][0])  # Append the word index
+    return sorted_clusters
 
-        return clusters
-    return []
+def draw_paragraph_bounding_boxes(image, paragraphs):
+    """Draw bounding boxes around each paragraph."""
+    for paragraph in paragraphs:
+        min_x = min(box[0][0] for _, box in paragraph)
+        max_x = max(box[1][0] for _, box in paragraph)
+        min_y = min(box[0][1] for _, box in paragraph)
+        max_y = max(box[2][1] for _, box in paragraph)
 
-def draw_bounding_boxes(image, word_boxes, clusters):
-    """Draw bounding boxes for each cluster."""
-    for cluster in clusters:
-        x_min = min(word_boxes[i][0] for i in cluster)
-        y_min = min(word_boxes[i][1] for i in cluster)
-        x_max = max(word_boxes[i][0] + word_boxes[i][2] for i in cluster)
-        y_max = max(word_boxes[i][1] + word_boxes[i][3] for i in cluster)
+        # Draw bounding box
+        cv2.rectangle(image, (int(min_x), int(min_y)), (int(max_x), int(max_y)), (0, 255, 0), 2)
 
-        cv2.rectangle(image, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
+    return image
 
-def process_document(image_path, output_folder):
-    """Main processing function for the document."""
-    # Load the image
-    image = cv2.imread(image_path)
+def detect_paragraphs(input_image_path, output_folder):
+    """Main function to detect paragraphs and draw bounding boxes."""
+    pipeline = keras_ocr.pipeline.Pipeline()
 
-    # Step 1: Extract words using keras-ocr
-    word_boxes = extract_words(image)
+    # Preprocess the image
+    img = preprocess_image(input_image_path)
+    predictions = pipeline.recognize([img])
 
-    # Step 2: Calculate distances
-    distances = calculate_distances(word_boxes)
+    # Determine dynamic thresholds
+    hor_threshold, ver_threshold = get_dynamic_thresholds(predictions[0])
 
-    # Step 3: Calculate dynamic thresholds
-    horizontal_threshold, vertical_threshold = calculate_dynamic_thresholds(word_boxes)
+    # Group words into clusters and paragraphs
+    paragraphs = group_words_by_clusters(predictions, hor_threshold, ver_threshold)
 
-    # Step 4: Cluster words based on thresholds
-    clusters = cluster_words(word_boxes, distances, horizontal_threshold, vertical_threshold)
-
-    # Step 5: Draw bounding boxes for clusters
-    draw_bounding_boxes(image, word_boxes, clusters)
+    # Draw bounding boxes around paragraphs
+    img_with_boxes = draw_paragraph_bounding_boxes(img.copy(), paragraphs)
 
     # Save the result
-    output_path = os.path.join(output_folder, 'processed_document.png')
-    cv2.imwrite(output_path, image)
-    print(f"Processed image saved to {output_path}")
+    output_path = os.path.join(output_folder, "paragraph_bounding_boxes.png")
+    cv2.imwrite(output_path, cv2.cvtColor(img_with_boxes, cv2.COLOR_RGB2BGR))
+    print(f"Paragraph bounding boxes saved to: {output_path}")
 
-# Example usage
 if __name__ == "__main__":
-    image_path = 'path_to_your_document_image.jpg'  # Replace with your input image path
-    output_folder = 'output'  # Specify your output folder here
-
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
-
-    process_document(image_path, output_folder)
+    input_image_path = "/path/to/your/input_image.png"
+    output_folder = "/path/to/output_folder"
+    detect_paragraphs(input_image_path, output_folder)
