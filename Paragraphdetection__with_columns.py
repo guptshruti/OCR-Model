@@ -63,7 +63,7 @@ def draw_paragraph_bounding_boxes(image, paragraphs):
         max_y = max(box[2][1] for _, box in paragraph)
 
         # Draw bounding box
-        cv2.rectangle(image, (int(min_x), int(min_y)), (int(max_x, int(max_y))), (0, 255, 0), 2)
+        cv2.rectangle(image, (int(min_x), int(min_y)), (int(max_x), int(max_y)), (0, 255, 0), 2)
 
     return image
 
