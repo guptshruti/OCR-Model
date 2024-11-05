@@ -132,7 +132,3 @@ def detect_paragraphs(input_image_path, output_folder):
     cv2.imwrite(output_path, cv2.cvtColor(img_with_boxes, cv2.COLOR_RGB2BGR))
     print(f"Paragraph bounding boxes saved to: {output_path}")
 
-if __name__ == "__main__":
-    input_image_path = "/path/to/your/input_image.png"
-    output_folder = "/path/to/output_folder"
-    detect_paragraphs(input_image_path, output_folder)
