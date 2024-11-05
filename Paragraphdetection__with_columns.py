@@ -1,4 +1,3 @@
-
 import os
 import cv2
 import numpy as np
@@ -53,13 +52,25 @@ def group_words(prediction_groups, hor_threshold, ver_threshold):
             # Detect large gaps indicating paragraph breaks
             paragraph_groups = []
             current_paragraph = [cluster[0]]
+            vertical_gaps = []
+            for i in range(1, len(cluster)):
+                prev_y = np.mean(cluster[i - 1][1], axis=0)[1]
+                curr_y = np.mean(cluster[i][1], axis=0)[1]
+                vertical_gap = abs(curr_y - prev_y)
+                vertical_gaps.append(vertical_gap)
+
+            # Compute dynamic paragraph threshold using mean + std dev
+            mean_gap = np.mean(vertical_gaps)
+            std_dev_gap = np.std(vertical_gaps)
+            dynamic_ver_threshold = mean_gap + std_dev_gap  # Adjust with std deviation to adapt to spacing
+
             for i in range(1, len(cluster)):
                 prev_y = np.mean(cluster[i - 1][1], axis=0)[1]
                 curr_y = np.mean(cluster[i][1], axis=0)[1]
                 vertical_gap = abs(curr_y - prev_y)
 
-                # If vertical gap is significantly larger than ver_threshold, create new paragraph
-                if vertical_gap > ver_threshold * 1.5:  # Adjust multiplier as needed
+                # If vertical gap exceeds dynamic threshold, create new paragraph
+                if vertical_gap > dynamic_ver_threshold:
                     paragraph_groups.append(current_paragraph)
                     current_paragraph = [cluster[i]]
                 else:
